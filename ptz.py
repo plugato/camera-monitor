@@ -11,11 +11,15 @@ A câmera é uma Yoosee/Gwell e o caminho de controle não é óbvio:
     só, e o passo é irregular -- medi 41 a 200px, com a direita andando mais que
     a esquerda. Não dá controle fino nem ida-e-volta simétrica.
   - Tilt (y) não faz nada nesta câmera: ela só gira na horizontal.
+  - Comando que chega com o motor andando é ENGOLIDO (medido: dois comandos a
+    0,5s de intervalo movem o mesmo que um). Espere ~3s entre os passos --
+    é o que o `passos` daqui já faz, com pausa de 3s.
   - RTSP também mente: OPTIONS anuncia USER_CMD_SET e SET_PARAMETER responde
     200 OK a qualquer ptzCmd, sem mover. Não use.
 """
 import socket
 import sys
+import time
 
 import config
 
@@ -48,9 +52,11 @@ def soap(corpo):
             resp += c
 
 
-def mover(direcao, passos=1):
+def mover(direcao, passos=1, pausa=3.0):
     x = VELOCIDADE[direcao]
-    for _ in range(passos):
+    for i in range(passos):
+        if i:
+            time.sleep(pausa)      # sem isso o passo seguinte é ignorado
         soap(f'<ptz:ContinuousMove><ptz:ProfileToken>{TOKEN}</ptz:ProfileToken>'
              f'<ptz:Velocity><tt:PanTilt x="{x}" y="0"/></ptz:Velocity>'
              f'</ptz:ContinuousMove>')

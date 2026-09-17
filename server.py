@@ -601,7 +601,8 @@ async function girar(d){
   if(ptzOcupado) return;
   ptzOcupado=true; painel.querySelectorAll('.seta').forEach(b=>b.disabled=true);
   try{ await fetch('/ptz/'+d,{method:'POST'}); }catch(e){}
-  setTimeout(()=>{ ptzOcupado=false; painel.querySelectorAll('.seta').forEach(b=>b.disabled=false); },1200);
+  // a câmera engole comando que chega com o motor andando: um passo leva ~3s
+  setTimeout(()=>{ ptzOcupado=false; painel.querySelectorAll('.seta').forEach(b=>b.disabled=false); },3000);
 }
 painel.querySelectorAll('.seta').forEach(b=>b.onclick=()=>girar(b.dataset.d));
 if('mediaSession' in navigator){
