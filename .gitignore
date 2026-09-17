@@ -1,0 +1,16 @@
+# credenciais da câmera
+.env
+
+# ambiente e caches
+.venv/
+__pycache__/
+*.pyc
+
+# gravações e log: conteúdo privado da rua/casa
+fotos/*
+!fotos/.gitkeep
+server.log
+nohup.out
+
+# material dos testes de detecção (imagens de terceiros)
+teste/
