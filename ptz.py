@@ -27,7 +27,12 @@ HOST = config.CAM_HOST
 PORT = config.CAM_ONVIF_PORT
 ENDPOINT = "/onvif/deviceio_service"
 TOKEN = "IPCProfilesToken0"          # de GetProfiles no /onvif/media_service
-VELOCIDADE = {"esquerda": -1, "direita": 1}
+VELOCIDADE = {
+  "esquerda": (-1, 0),
+  "direita": (1, 0),
+  "cima": (0, 1),
+  "baixo": (0, -1),
+}
 
 ENVELOPE = """<?xml version="1.0" encoding="UTF-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -53,12 +58,12 @@ def soap(corpo):
 
 
 def mover(direcao, passos=1, pausa=3.0):
-    x = VELOCIDADE[direcao]
+    x, y = VELOCIDADE[direcao]
     for i in range(passos):
         if i:
             time.sleep(pausa)      # sem isso o passo seguinte é ignorado
         soap(f'<ptz:ContinuousMove><ptz:ProfileToken>{TOKEN}</ptz:ProfileToken>'
-             f'<ptz:Velocity><tt:PanTilt x="{x}" y="0"/></ptz:Velocity>'
+             f'<ptz:Velocity><tt:PanTilt x="{x}" y="{y}"/></ptz:Velocity>'
              f'</ptz:ContinuousMove>')
         # o Stop não interrompe o passo (ele é fixo), mas evita deixar a
         # câmera em movimento se um firmware futuro respeitar a duração

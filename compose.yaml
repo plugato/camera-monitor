@@ -1,0 +1,25 @@
+services:
+  camera-monitor:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MEDIAMTX_URL: rtsp://127.0.0.1:8554/camera
+      AUDIO_RTSP_URL: rtsp://127.0.0.1:8554/camera
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./fotos:/app/fotos
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      camera-monitor:
+        condition: service_healthy
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}

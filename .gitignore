@@ -1,5 +1,6 @@
 # credenciais da câmera
 .env
+mediamtx.yml
 
 # ambiente e caches
 .venv/
@@ -10,6 +11,7 @@ __pycache__/
 fotos/*
 !fotos/.gitkeep
 server.log
+mediamtx.log
 nohup.out
 
 # material dos testes de detecção (imagens de terceiros)

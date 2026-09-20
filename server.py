@@ -1,40 +1,53 @@
 #!/usr/bin/env python3
 """Monitor da câmera RTSP: página web com detecção de pessoas/animais.
 
-Fluxo: VLC (Windows) puxa o RTSP da câmera via UDP e re-serve como MJPEG
-por HTTP; este servidor lê o MJPEG, roda MobileNet-SSD nos frames, desenha
-as caixas, serve a página em http://localhost:8090 e dispara toast nativo
-do Windows (via powershell.exe) quando pessoa ou animal aparece.
+Fluxo: FFmpeg puxa o RTSP da câmera e entrega MJPEG pelo pipe; este servidor
+lê os frames, roda MobileNet-SSD, desenha as caixas, serve a página em
+http://localhost:8090 e dispara uma notificação desktop.
 """
 
 import hashlib
+import hmac
 import json
 import os
 import queue
 import re
+import shutil
 import socket
 import subprocess
 import threading
 import time
 from collections import deque
+from urllib.parse import unquote, urlsplit
 
 import cv2
 import numpy as np
 
 import config
 import ptz
-from flask import Flask, Response, jsonify, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 # ---------------------------------------------------------------- config
-# O WSL (modo NAT) não recebe o RTP/UDP da câmera e o firewall do Windows
-# bloqueia portas abertas no host, então o vlc.exe roda como subprocesso e
-# entrega o MJPEG pelo stdout (pipe atravessa a fronteira WSL/Windows).
-VLC_EXE = "/mnt/c/Program Files/VideoLAN/VLC/vlc.exe"
+# O backend pode ser escolhido com VIDEO_BACKEND=auto|ffmpeg|vlc.
+FFMPEG_EXE = shutil.which("ffmpeg") or "ffmpeg"
+FLATPAK_VLC = ([shutil.which("flatpak"), "run", "--command=cvlc",
+                "org.videolan.VLC"] if shutil.which("flatpak") else None)
+VLC_CANDIDATES = (
+    r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+    "/mnt/c/Program Files/VideoLAN/VLC/vlc.exe",
+    shutil.which("vlc") or "",
+)
+VLC_EXE = next((path for path in VLC_CANDIDATES if os.path.exists(path)), None)
+VIDEO_BACKEND = os.environ.get("VIDEO_BACKEND", "auto").lower()
+MEDIAMTX_URL = os.environ.get("MEDIAMTX_URL", "rtsp://127.0.0.1:8554/camera")
+if VIDEO_BACKEND == "auto":
+    VIDEO_BACKEND = "mediamtx" if os.environ.get("MEDIAMTX_URL") else (
+        "vlc" if (FLATPAK_VLC or VLC_EXE) else "ffmpeg")
 RTSP_URL = config.RTSP_URL     # vem do .env, fora do git
-VLC_SOUT = (":sout=#transcode{vcodec=MJPG,fps=8}"
-            ":standard{access=file,mux=mpjpeg,dst=-}")
 CAM_HOST = config.CAM_HOST
 HTTP_PORT = 8090
+APP_USER = os.environ.get("APP_USER", "")
+APP_PASS = os.environ.get("APP_PASS", "")
 FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
 DETECT_EVERY_N_FRAMES = 3      # detecção a cada N frames (CPU)
 CONFIDENCE_MIN = 0.65
@@ -73,20 +86,40 @@ state = {
 lock = threading.Lock()
 
 
-def windows_toast(title: str, msg: str) -> None:
-    """Toast nativo do Windows via WinRT (Windows PowerShell 5.1)."""
-    ps = f"""
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
-$t = $xml.GetElementsByTagName('text')
-$t.Item(0).AppendChild($xml.CreateTextNode('{title}')) | Out-Null
-$t.Item(1).AppendChild($xml.CreateTextNode('{msg}')) | Out-Null
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Camera Monitor').Show([Windows.UI.Notifications.ToastNotification]::new($xml))
-"""
-    subprocess.Popen(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+@app.before_request
+def require_login():
+    if request.path == "/healthz":
+        return None
+    auth = request.authorization
+    valid = (auth is not None
+             and hmac.compare_digest(auth.username, APP_USER)
+             and hmac.compare_digest(auth.password, APP_PASS))
+    if not APP_USER or not APP_PASS or not valid:
+        return Response("autenticacao necessaria", 401,
+                        {"WWW-Authenticate": 'Basic realm="Camera Monitor"'})
+
+
+@app.route("/healthz")
+def healthz():
+    return "ok"
+
+
+def desktop_notify(title: str, msg: str) -> None:
+    """Envia notificação nativa no Windows, Linux ou WSL."""
+    if os.name == "nt":
+        ps = ("Add-Type -AssemblyName System.Windows.Forms; "
+              f"[System.Windows.Forms.MessageBox]::Show('{msg}', '{title}')")
+        try:
+            subprocess.Popen(["powershell.exe", "-NoProfile", "-Command", ps],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            pass
+        return
+    try:
+        subprocess.Popen(["notify-send", title, msg],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        pass
 
 
 def detect(frame):
@@ -169,39 +202,44 @@ def maybe_notify(dets):
         state["last_notify"][cat] = now
         titulo = "Pessoa detectada!" if cat == "pessoa" else "Animal detectado!"
         msg = f"Câmera: {', '.join(sorted(set(labels)))} em cena."
-        windows_toast(titulo, msg)
+        desktop_notify(titulo, msg)
         fired.append({"time": time.strftime("%H:%M:%S"), "title": titulo,
                       "msg": msg, "cat": cat})
     return fired
 
 
-def kill_vlc(proc=None):
-    """proc.kill() derruba só o wrapper do WSL: o vlc.exe do Windows sobrevive e
-    segura a sessão RTSP (a câmera só aceita uma), então o VLC novo nunca pega o
-    stream -> trava -> reinicia -> vaza outro. Mata pela linha de comando, para
-    não derrubar um VLC que o usuário tenha aberto para outra coisa."""
+def kill_video(proc=None):
+    """Encerra apenas o processo de vídeo iniciado pelo monitor."""
     if proc:
         proc.kill()
-    subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                    "Get-CimInstance Win32_Process -Filter \"Name='vlc.exe'\" | "
-                    f"Where-Object {{ $_.CommandLine -like '*{CAM_HOST}*' }} | "
-                    "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def vlc_frames():
-    """Gera frames BGR lendo o MJPEG do stdout do vlc.exe (Windows)."""
+    """Gera frames BGR pelo VLC ou FFmpeg, conforme a plataforma."""
     while True:
-        proc = subprocess.Popen(
-            [VLC_EXE, "-I", "dummy", "--no-audio", RTSP_URL, VLC_SOUT],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        if VIDEO_BACKEND == "vlc" and (FLATPAK_VLC or VLC_EXE):
+            vlc_command = FLATPAK_VLC or [VLC_EXE]
+            command = vlc_command + ["-I", "dummy", "--no-audio", "--rtsp-tcp",
+                       RTSP_URL, ":sout=#transcode{vcodec=MJPG,acodec=none,fps=8}"
+                       ":standard{access=file,mux=mpjpeg,dst=-}"]
+        elif VIDEO_BACKEND == "mediamtx":
+            command = [FFMPEG_EXE, "-hide_banner", "-loglevel", "error",
+                       "-rtsp_transport", "tcp", "-i", MEDIAMTX_URL,
+                       "-map", "0:v:0", "-an", "-vf", "fps=8",
+                       "-f", "mpjpeg", "-q:v", "5", "pipe:1"]
+        else:
+            command = [FFMPEG_EXE, "-hide_banner", "-loglevel", "error",
+                       "-rtsp_transport", "tcp", "-i", RTSP_URL, "-an",
+                       "-vf", "fps=8", "-f", "mpjpeg", "-q:v", "5", "pipe:1"]
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, bufsize=0)
         state["video_proc"] = proc
         last = [time.time()]
 
-        def watchdog():  # o read() do pipe bloqueia para sempre se o VLC travar
+        def watchdog():  # o read() do pipe bloqueia se o backend travar
             while proc.poll() is None:
                 if time.time() - last[0] > STALL_S:
-                    kill_vlc(proc)
+                    kill_video(proc)
                     return
                 time.sleep(1)
         threading.Thread(target=watchdog, daemon=True).start()
@@ -225,7 +263,7 @@ def vlc_frames():
                         state["connected"] = True
                         yield frame
         finally:
-            kill_vlc(proc)
+            kill_video(proc)
         state["connected"] = False
         time.sleep(2)
 
@@ -275,13 +313,18 @@ def _alaw_table():
 ALAW = _alaw_table()
 audio_clients = set()          # queue.Queue por cliente de /audio
 audio_ready = threading.Event()
+audio_thread_started = False
+audio_thread_lock = threading.Lock()
 
 
 def rtsp_audio():
     """Gera payloads PCMA (A-law) do track de áudio, reconectando sempre."""
-    host, port = config.CAM_HOST, config.CAM_RTSP_PORT
-    user, pwd = config.CAM_USER, config.CAM_PASS
-    url = f"rtsp://{host}:{port}/{config.CAM_PATH}"
+    relay_audio = os.environ.get("AUDIO_RTSP_URL")
+    url = relay_audio or RTSP_URL
+    parsed = urlsplit(url)
+    host, port = parsed.hostname, parsed.port or 554
+    user = unquote(parsed.username or "")
+    pwd = unquote(parsed.password or "")
     while True:
         s = None
         try:
@@ -321,15 +364,18 @@ def rtsp_audio():
             if " 401 " in h:
                 auth = dict(re.findall(r'(realm|nonce)="([^"]+)"', h))
                 h = req("DESCRIBE", url, "Accept: application/sdp\r\n")
-            # a câmera exige o vídeo na sessão (SETUP só do áudio falha); descartamos o canal 0
-            h = req("SETUP", url + "/track1", "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n")
+            # A câmera usa track1/track2; o relay MediaMTX usa trackID=0/trackID=1.
+            video_track = "/trackID=0" if relay_audio else "/track1"
+            audio_track = "/trackID=1" if relay_audio else "/track2"
+            h = req("SETUP", url + video_track,
+                    "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n")
             sess = re.search(r"Session: ([^;\r\n]+)", h).group(1)
-            h = req("SETUP", url + "/track2",
+            h = req("SETUP", url + audio_track,
                     f"Transport: RTP/AVP/TCP;unicast;interleaved=2-3\r\nSession: {sess}\r\n")
             if " 200 " not in h.splitlines()[0]:
                 proc = state.get("video_proc")   # VLC pegou a vaga de áudio: derruba, ele reinicia sem ela
                 if proc:
-                    kill_vlc(proc)
+                    kill_video(proc)
                 raise OSError("SETUP áudio: " + h.splitlines()[0])
             req("PLAY", url, f"Session: {sess}\r\nRange: npt=0.000-\r\n")
             audio_ready.set()
@@ -380,6 +426,11 @@ def audio_loop():
 @app.route("/audio")
 def audio():
     """PCM16 LE mono, AUDIO_RATE Hz, sem cabeçalho; o navegador toca via Web Audio."""
+    global audio_thread_started
+    with audio_thread_lock:
+        if not audio_thread_started:
+            threading.Thread(target=audio_loop, daemon=True).start()
+            audio_thread_started = True
     q = queue.Queue()
     audio_clients.add(q)
 
@@ -425,7 +476,7 @@ def test():
     fotos = sorted(os.listdir(FOTOS_DIR))
     ev = {"time": time.strftime("%H:%M:%S"), "title": "Teste!",
           "msg": "Notificação simulada.", "photo": fotos[-1] if fotos else None}
-    windows_toast("Teste", ev["msg"])
+    desktop_notify("Teste", ev["msg"])
     with lock:
         state["events"].appendleft(ev)
     return "ok, notificação simulada"
@@ -484,6 +535,8 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
   .seta:active{background:#1d4ed8}
   .seta:disabled{opacity:.15;cursor:wait}
   .esq{left:6px} .dir{right:6px}
+    .cima{top:6px;left:50%;transform:translateX(-50%)}
+    .baixo{top:auto;bottom:6px;left:50%;transform:translateX(-50%)}
   #now{position:absolute;left:6px;right:6px;bottom:6px;line-height:1.5}
   #now:empty{display:none}
   #aviso{text-align:center;color:#9ca3af;padding:20px}
@@ -501,9 +554,11 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
       <button id="au" title="áudio da câmera">🔇</button>
       <button id="aual" title="ligar o áudio sozinho por 20s quando houver detecção">🔈</button>
     </div>
-    <div class="cam"><img src="/stream" alt="stream da câmera">
+        <div class="cam"><img src="/stream" alt="stream da câmera">
+            <button class="seta cima" data-d="cima" title="inclinar para cima">▲</button>
       <button class="seta esq" data-d="esquerda" title="girar para a esquerda">◀</button>
       <button class="seta dir" data-d="direita" title="girar para a direita">▶</button>
+            <button class="seta baixo" data-d="baixo" title="inclinar para baixo">▼</button>
       <div id="now"></div>
     </div>
   </div>
@@ -659,7 +714,5 @@ def _selfcheck():
 if __name__ == "__main__":
     _selfcheck()
     os.makedirs(FOTOS_DIR, exist_ok=True)
-    threading.Thread(target=audio_loop, daemon=True).start()
-    audio_ready.wait(8)  # áudio conecta antes: a câmera só aceita 1 sessão de áudio
     threading.Thread(target=capture_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=HTTP_PORT, threaded=True)
