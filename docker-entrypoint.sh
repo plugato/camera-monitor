@@ -34,4 +34,4 @@ done
 
 export MEDIAMTX_URL="rtsp://127.0.0.1:8554/camera"
 export AUDIO_RTSP_URL="$MEDIAMTX_URL"
-exec python3 server.py
+exec gunicorn -c gunicorn.conf.py server:app

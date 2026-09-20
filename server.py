@@ -711,8 +711,14 @@ def _selfcheck():
     assert ALAW[0x55] == -8 and ALAW[0xD5] == 8 and ALAW[0x2A] == -32256 and ALAW[0xAA] == 32256
 
 
+def start_capture_worker():
+    """Inicia a captura uma vez, tanto no Gunicorn quanto no modo local."""
+    if not any(thread.name == "camera-capture" for thread in threading.enumerate()):
+        threading.Thread(target=capture_loop, name="camera-capture", daemon=True).start()
+
+
 if __name__ == "__main__":
     _selfcheck()
     os.makedirs(FOTOS_DIR, exist_ok=True)
-    threading.Thread(target=capture_loop, daemon=True).start()
+    start_capture_worker()
     app.run(host="0.0.0.0", port=HTTP_PORT, threaded=True)

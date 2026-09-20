@@ -2,10 +2,14 @@
 
 > Monitoramento RTSP com deteccao de pessoas e animais, audio da camera, alertas e controle PTZ em uma interface web protegida.
 
+![Camera Monitor](docs/preview.svg)
+
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![MediaMTX](https://img.shields.io/badge/RTSP-MediaMTX-111827)](https://github.com/bluenviron/mediamtx)
-[![License](https://img.shields.io/badge/license-private-lightgrey)](#)
+[![CI](https://github.com/plugato/camera-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/plugato/camera-monitor/actions/workflows/ci.yml)
+
+**Documentacao:** [seguranca](SECURITY.md) · [como contribuir](CONTRIBUTING.md) · [changelog](CHANGELOG.md)
 
 O Camera Monitor transforma o stream RTSP da camera em um painel web pratico para acompanhar a cena, ouvir o audio, receber notificacoes e mover uma camera PTZ.
 
