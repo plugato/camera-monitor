@@ -47,6 +47,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency: deploy-pi
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,5 +70,6 @@ jobs:
           printf '%s %s\n' "$PI_SSH_HOST" "$PI_KNOWN_HOSTS" > ~/.ssh/known_hosts
           tar -czf - Dockerfile.pi compose.pi.yaml server.py config.py ptz.py gunicorn.conf.py \
               docker-entrypoint.sh MobileNetSSD_deploy.prototxt MobileNetSSD_deploy.caffemodel \
-            | ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            | timeout 600 ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+                -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 \
                 -o ProxyCommand="cloudflared access ssh --hostname %h" "pi@$PI_SSH_HOST"
