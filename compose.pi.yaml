@@ -1,0 +1,28 @@
+# Raspberry Pi na mesma rede da camera. Standalone (nao e overlay):
+#   docker compose -f compose.pi.yaml up -d --build
+#
+# - Pi 3 nao decodifica o H265 1080p em tempo real: use CAM_PATH=onvif2
+#   (substream 640x360) no .env. A deteccao custa ~2,5s por analise la; com
+#   DETECT_THREADS=2 e DETECT_INTERVAL_S=1 sobra ~50% de CPU para o resto.
+# - A porta 8090 do host ja esta em uso no Pi, por isso 8091.
+# - Sem container cloudflared: o Pi ja roda o cloudflared como servico. Publique
+#   um hostname apontando para http://localhost:8091 no painel do tunnel.
+services:
+  camera-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.pi
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MEDIAMTX_URL: rtsp://127.0.0.1:8554/camera
+      AUDIO_RTSP_URL: rtsp://127.0.0.1:8554/camera
+    ports:
+      - "127.0.0.1:8091:8090"
+    volumes:
+      - ./fotos:/app/fotos
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')"]
+      interval: 30s
+      timeout: 10s
+      retries: 6

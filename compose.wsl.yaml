@@ -1,0 +1,12 @@
+# Overlay para rodar no WSL2. Use junto do compose padrao:
+#   docker compose -f compose.yaml -f compose.wsl.yaml up -d --build
+#
+# Motivo: o NAT do Windows nao entrega o RTP/UDP da camera dentro da WSL, entao
+# o MediaMTX roda no host Windows (start-mediamtx-windows.ps1) e o container so
+# le o relay por TCP. No Linux nativo nada disso e necessario.
+services:
+  camera-monitor:
+    environment:
+      # IP do host Windows visto pela WSL (gateway da rota default).
+      # Descubra com: ip route | awk '/default/{print $3}'
+      EXTERNAL_MEDIAMTX_URL: rtsp://${WINDOWS_HOST:?defina WINDOWS_HOST no .env}:8554/camera

@@ -95,6 +95,33 @@ Painel local:
 http://localhost:8090
 ```
 
+### Rodando em WSL2
+
+No Linux nativo o comando acima basta. Em WSL2 nao: a camera so entrega RTP por
+UDP e o NAT do Windows nao devolve esse trafego para dentro da WSL. O handshake
+RTSP passa, a midia nunca chega, e o painel fica em `connected: false`.
+
+A saida e deixar o MediaMTX no host Windows, que enxerga a camera na mesma
+sub-rede, e fazer o container consumir o relay dele por TCP. Baixe o
+`mediamtx.exe` (build `windows_amd64`) na raiz do projeto e, em um terminal do
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-mediamtx-windows.ps1
+```
+
+Defina `WINDOWS_HOST` no `.env` com o IP do host Windows visto pela WSL:
+
+```bash
+ip route | awk '/default/{print $3}'
+```
+
+E suba o container com o overlay:
+
+```bash
+docker compose -f compose.yaml -f compose.wsl.yaml up -d --build
+```
+
 A aplicacao exige `APP_USER` e `APP_PASS`. O endpoint `/healthz` fica disponivel apenas para o healthcheck interno do Docker.
 
 ## Cloudflare Tunnel
@@ -175,6 +202,8 @@ Se o monitor estiver `connected: false`, confira nesta ordem:
 3. Logs do MediaMTX no container `camera-monitor`.
 4. Perdas de pacotes UDP na rede local.
 5. Se a camera aceita apenas uma sessao RTSP simultanea.
+6. Se o host e WSL2: veja `Rodando em WSL2`. O sintoma tipico e o MediaMTX
+   reconhecer as trilhas e logo depois registrar `UDP timeout` em loop.
 
 ## Testes
 
@@ -198,7 +227,9 @@ server.py                 Aplicacao Flask, stream, deteccao, audio e PTZ
 ptz.py                    Cliente ONVIF para movimento da camera
 Dockerfile                Imagem do monitor com FFmpeg e MediaMTX
 compose.yaml              Monitor e Cloudflare Tunnel
+compose.wsl.yaml          Overlay para WSL2, com o MediaMTX no host Windows
 docker-entrypoint.sh      Inicializa MediaMTX e o servidor Python
+start-mediamtx-windows.ps1  Relay MediaMTX no host Windows, so para WSL2
 .env.exemplo              Modelo de configuracao local
 fotos/                    Fotos privadas dos eventos
 MobileNetSSD_deploy.*     Modelo MobileNet-SSD e configuracao Caffe

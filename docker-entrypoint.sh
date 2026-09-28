@@ -1,6 +1,17 @@
 #!/bin/sh
 set -eu
 
+# No Linux o conntrack do netfilter devolve o RTP/UDP da camera para dentro do
+# container, entao o MediaMTX sobe aqui mesmo. Em WSL2 existe um NAT a mais, do
+# lado do Windows, que nao tem esse retorno: o handshake RTSP passa e a midia
+# nunca chega. La o MediaMTX roda no host Windows, que enxerga a camera na mesma
+# sub-rede, e aqui so consumimos o relay dele por TCP.
+if [ -n "${EXTERNAL_MEDIAMTX_URL:-}" ]; then
+    export MEDIAMTX_URL="$EXTERNAL_MEDIAMTX_URL"
+    export AUDIO_RTSP_URL="$MEDIAMTX_URL"
+    exec gunicorn -c gunicorn.conf.py server:app
+fi
+
 python3 - <<'PY'
 import os
 from urllib.parse import quote

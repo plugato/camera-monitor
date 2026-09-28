@@ -1,6 +1,7 @@
 # credenciais da câmera
 .env
 mediamtx.yml
+mediamtx.exe
 
 # ambiente e caches
 .venv/

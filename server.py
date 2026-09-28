@@ -17,7 +17,9 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.request
 from collections import deque
+from email.header import Header
 from urllib.parse import unquote, urlsplit
 
 import cv2
@@ -48,8 +50,13 @@ CAM_HOST = config.CAM_HOST
 HTTP_PORT = 8090
 APP_USER = os.environ.get("APP_USER", "")
 APP_PASS = os.environ.get("APP_PASS", "")
+NTFY_URL = os.environ.get("NTFY_URL", "")  # push no celular: https://ntfy.sh/<tópico-secreto>
 FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
-DETECT_EVERY_N_FRAMES = 3      # detecção a cada N frames (CPU)
+# A detecção roda em thread própria sobre o frame mais recente, então o vídeo não
+# trava enquanto ela pensa (num Pi 3 uma análise custa ~2,5s). Estes dois são o
+# botão de CPU: pausa entre análises e threads do OpenCV (0 = todas).
+DETECT_INTERVAL_S = float(os.environ.get("DETECT_INTERVAL_S", "0.4"))
+DETECT_THREADS = int(os.environ.get("DETECT_THREADS", "0"))
 CONFIDENCE_MIN = 0.65
 NOTIFY_COOLDOWN_S = 20         # antispam de toast, por categoria
 STREAK_MIN = 3                 # nº de análises consecutivas antes de notificar
@@ -74,6 +81,8 @@ BOX_COLOR = {"pessoa": (80, 180, 255), "animal": (120, 255, 120)}  # BGR
 
 net = cv2.dnn.readNetFromCaffe("MobileNetSSD_deploy.prototxt",
                                "MobileNetSSD_deploy.caffemodel")
+if DETECT_THREADS:
+    cv2.setNumThreads(DETECT_THREADS)
 
 app = Flask(__name__)
 state = {
@@ -102,6 +111,26 @@ def require_login():
 @app.route("/healthz")
 def healthz():
     return "ok"
+
+
+def phone_notify(title, msg, jpg=None):
+    """Push via ntfy (app no celular), com a foto anexada. Em thread: rede lenta
+    não pode segurar o loop de captura."""
+    if not NTFY_URL:
+        return
+    headers = {"Title": Header(title, "utf-8").encode(),
+               "Message": Header(msg, "utf-8").encode(),
+               "Priority": "high", "Tags": "rotating_light"}
+    if jpg:
+        headers["Filename"] = "foto.jpg"
+
+    def send():
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                NTFY_URL, data=jpg or msg.encode(), headers=headers), timeout=15)
+        except OSError as e:
+            print(f"ntfy falhou: {e}", flush=True)
+    threading.Thread(target=send, daemon=True).start()
 
 
 def desktop_notify(title: str, msg: str) -> None:
@@ -268,14 +297,31 @@ def vlc_frames():
         time.sleep(2)
 
 
+detect_slot = {"frame": None, "dets": [], "fired": []}
+detect_ready = threading.Event()
+
+
+def detect_loop():
+    while True:
+        detect_ready.wait()
+        detect_ready.clear()
+        with lock:
+            frame = detect_slot["frame"]
+        dets = drop_static(detect(frame))
+        fired = maybe_notify(dets)  # sempre, para zerar streaks quando a cena esvazia
+        with lock:
+            detect_slot["dets"] = dets
+            detect_slot["fired"] += fired
+        time.sleep(DETECT_INTERVAL_S)
+
+
 def capture_loop():
-    n = 0
-    dets, fired = [], []
     for frame in vlc_frames():
-        n += 1
-        if n % DETECT_EVERY_N_FRAMES == 0:
-            dets = drop_static(detect(frame))
-            fired = maybe_notify(dets)  # sempre, para zerar streaks quando a cena esvazia
+        with lock:
+            detect_slot["frame"] = frame.copy()  # o desenho abaixo não vaza pro detector
+            dets, fired = detect_slot["dets"], detect_slot["fired"]
+            detect_slot["fired"] = []
+        detect_ready.set()
         for d in dets:
             x1, y1, x2, y2 = d["box"]
             color = BOX_COLOR[d["category"]]
@@ -289,6 +335,7 @@ def capture_loop():
                 ev["photo"] = f"{time.strftime('%Y%m%d_%H%M%S')}_{ev.pop('cat')}.jpg"
                 with open(os.path.join(FOTOS_DIR, ev["photo"]), "wb") as f:
                     f.write(jpg.tobytes())
+                phone_notify(ev["title"], ev["msg"], jpg.tobytes())
             with lock:
                 state["jpeg"] = jpg.tobytes()
                 state["detections"] = dets
@@ -374,7 +421,7 @@ def rtsp_audio():
                     f"Transport: RTP/AVP/TCP;unicast;interleaved=2-3\r\nSession: {sess}\r\n")
             if " 200 " not in h.splitlines()[0]:
                 proc = state.get("video_proc")   # VLC pegou a vaga de áudio: derruba, ele reinicia sem ela
-                if proc:
+                if proc and not relay_audio:     # no relay a falha é stream sem áudio (onvif2): não derruba o vídeo
                     kill_video(proc)
                 raise OSError("SETUP áudio: " + h.splitlines()[0])
             req("PLAY", url, f"Session: {sess}\r\nRange: npt=0.000-\r\n")
@@ -477,6 +524,7 @@ def test():
     ev = {"time": time.strftime("%H:%M:%S"), "title": "Teste!",
           "msg": "Notificação simulada.", "photo": fotos[-1] if fotos else None}
     desktop_notify("Teste", ev["msg"])
+    phone_notify("Teste", ev["msg"])
     with lock:
         state["events"].appendleft(ev)
     return "ok, notificação simulada"
@@ -715,6 +763,7 @@ def start_capture_worker():
     """Inicia a captura uma vez, tanto no Gunicorn quanto no modo local."""
     if not any(thread.name == "camera-capture" for thread in threading.enumerate()):
         threading.Thread(target=capture_loop, name="camera-capture", daemon=True).start()
+        threading.Thread(target=detect_loop, name="camera-detect", daemon=True).start()
 
 
 if __name__ == "__main__":
