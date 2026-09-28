@@ -21,10 +21,12 @@ O Camera Monitor transforma o stream RTSP da camera em um painel web pratico par
 - Detecta pessoas e animais com limiar de confianca configuravel no codigo.
 - Desenha as deteccoes no stream e registra fotos dos alertas.
 - Envia notificacoes desktop no Linux e no Windows.
+- Envia push para o celular (app ntfy) com a foto do alerta e link para o ao vivo.
 - Reproduz o audio da camera pelo navegador.
 - Controla o eixo horizontal e vertical da camera via ONVIF/PTZ.
 - Protege o painel com usuario e senha HTTP Basic.
 - Pode publicar o painel por um Cloudflare Tunnel dentro do Docker.
+- Roda sozinho num Raspberry Pi 3 na rede da camera, sem PC ligado.
 
 ## Arquitetura
 
@@ -36,6 +38,7 @@ flowchart LR
     P --> B[Navegador\nvideo, audio, alertas e PTZ]
     P --> T[Cloudflare Tunnel\nacesso remoto HTTPS]
     P --> O[ONVIF\nmovimento PTZ]
+    P --> N[ntfy\npush no celular]
 ```
 
 O fluxo principal fica dentro de um container. O MediaMTX e o monitor Python compartilham a rede interna do container; o Cloudflare Tunnel fica em um container separado e publica apenas a porta web do monitor.
@@ -71,6 +74,17 @@ APP_PASS=use-uma-senha-longa-e-unica
 
 CLOUDFLARE_TUNNEL_TOKEN=token-do-tunel
 ```
+
+Variaveis opcionais:
+
+| Variavel | Padrao | Para que serve |
+| --- | --- | --- |
+| `CAM_AUDIO_PATH` | vazio | Caminho da camera de onde puxar o audio, quando `CAM_PATH` nao tem audio (ex.: `onvif2` + `onvif1`) |
+| `NTFY_URL` | vazio | Topico ntfy para push no celular. Vazio desliga o push |
+| `PUBLIC_URL` | vazio | Endereco publico do painel; tocar na notificacao abre o ao vivo |
+| `DETECT_THREADS` | `0` (todas) | Threads do OpenCV na deteccao |
+| `DETECT_INTERVAL_S` | `0.4` | Pausa minima entre duas analises |
+| `WINDOWS_HOST` | vazio | So para WSL2, com `compose.wsl.yaml` |
 
 O arquivo `.env` e ignorado pelo Git. Nunca coloque credenciais diretamente em `compose.yaml`, no codigo ou em commits.
 
@@ -122,6 +136,89 @@ E suba o container com o overlay:
 docker compose -f compose.yaml -f compose.wsl.yaml up -d --build
 ```
 
+### Rodando num Raspberry Pi
+
+E o modo de producao: o Pi fica na mesma rede da camera, entao o RTP/UDP chega
+direto e nenhum PC precisa ficar ligado. Testado num Raspberry Pi 3 Model B
+(1 GB, Raspberry Pi OS 32 bits).
+
+- `Dockerfile.pi` usa o OpenCV e o numpy do Debian: o PyPI nao tem wheel para
+  armv7 e compilar num Pi 3 leva horas.
+- `compose.pi.yaml` e standalone (nao e overlay) e publica o painel so em
+  `127.0.0.1:8091`; o acesso de fora e pelo `cloudflared` do proprio Pi.
+- O Pi 3 nao decodifica o H.265 1080p em tempo real (so decodificar ja fica em
+  0,97x). Use o substream: `CAM_PATH=onvif2` (640x360). Ele nao tem audio, entao
+  `CAM_AUDIO_PATH=onvif1`: o MediaMTX puxa o audio do stream principal so
+  enquanto alguem escuta.
+- Uma analise do MobileNet-SSD custa ~2,5 s no Pi 3. A deteccao roda em thread
+  propria sobre o frame mais recente, entao o video nao trava; com
+  `DETECT_THREADS=2` e `DETECT_INTERVAL_S=1` sobra ~50% de CPU.
+
+`.env` do Pi, alem das credenciais:
+
+```env
+CAM_PATH=onvif2
+CAM_AUDIO_PATH=onvif1
+DETECT_THREADS=2
+DETECT_INTERVAL_S=1
+NTFY_URL=https://ntfy.sh/<topico-secreto>
+PUBLIC_URL=https://camera.seudominio.com/
+```
+
+Copiar so o necessario e subir (a partir da raiz do projeto):
+
+```bash
+tar -czf - Dockerfile.pi compose.pi.yaml server.py config.py ptz.py gunicorn.conf.py \
+    docker-entrypoint.sh MobileNetSSD_deploy.prototxt MobileNetSSD_deploy.caffemodel \
+  | ssh pi@ssh-pi 'mkdir -p ~/camera-monitor/fotos && tar -C ~/camera-monitor -xzf -'
+ssh pi@ssh-pi 'cd ~/camera-monitor && docker compose -f compose.pi.yaml up -d --build'
+```
+
+O `.env` vai a parte, uma vez (`chmod 600` no Pi). O primeiro build leva ~7 min
+no Pi 3; os seguintes so trocam a camada do codigo.
+
+No painel do Cloudflare Tunnel do Pi, publique o hostname com servico `HTTP` e
+URL `localhost:8091`. Para SSH pelo mesmo tunnel, use um hostname com servico
+`SSH` e URL `localhost:22`, e no `~/.ssh/config` da sua maquina:
+
+```text
+Host ssh-pi
+    HostName ssh-pi.seudominio.com
+    ProxyCommand cloudflared access ssh --hostname %h
+```
+
+#### Deploy automatico pelo GitHub
+
+Todo push na `main` com o CI verde roda o job `deploy-pi` (`.github/workflows/ci.yml`):
+ele entra no Pi pelo Cloudflare Tunnel e manda os arquivos do app por SSH. No Pi
+a chave de deploy tem **comando forcado** (`deploy-pi.sh`): so consegue extrair
+os arquivos e rodar `docker compose up --build --wait`, sem shell.
+
+Configuracao, uma vez:
+
+1. Chave de deploy: `ssh-keygen -t ed25519 -N "" -C github-deploy-camera -f ~/.ssh/camera_deploy`
+2. No Pi, o script e a chave restrita:
+
+   ```bash
+   ssh pi@ssh-pi 'mkdir -p ~/bin && cat > ~/bin/camera-deploy && chmod 755 ~/bin/camera-deploy' < deploy-pi.sh
+   printf 'command="/home/pi/bin/camera-deploy",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding %s\n' \
+     "$(cat ~/.ssh/camera_deploy.pub)" | ssh pi@ssh-pi 'cat >> ~/.ssh/authorized_keys'
+   ```
+
+3. Cloudflare Zero Trust: **Access > Service Auth > Service Tokens > Create**, e na
+   aplicacao do `ssh-pi` uma policy com acao **Service Auth** incluindo esse token.
+4. GitHub, **Settings > Secrets and variables > Actions**:
+
+   | Secret | Valor |
+   | --- | --- |
+   | `PI_SSH_KEY` | conteudo de `~/.ssh/camera_deploy` (a privada) |
+   | `PI_SSH_HOST` | `ssh-pi.seudominio.com` |
+   | `PI_KNOWN_HOSTS` | chave do host: `ssh pi@ssh-pi cat /etc/ssh/ssh_host_ed25519_key.pub` (so `tipo chave`) |
+   | `CF_ACCESS_CLIENT_ID` | Client ID do service token |
+   | `CF_ACCESS_CLIENT_SECRET` | Client Secret do service token |
+
+O `.env` do Pi nao passa pelo GitHub: continua so no Pi.
+
 A aplicacao exige `APP_USER` e `APP_PASS`. O endpoint `/healthz` fica disponivel apenas para o healthcheck interno do Docker.
 
 ## Cloudflare Tunnel
@@ -136,6 +233,21 @@ No painel da Cloudflare, associe um Public Hostname ao tunnel:
 - URL: `camera-monitor:8090`
 
 Para exigir uma conta ou e-mail especifico, configure tambem uma aplicacao em **Zero Trust > Access > Applications**. A autenticacao Basic da aplicacao continua sendo uma segunda camada independente.
+
+## Notificacoes no celular
+
+Com `NTFY_URL` definido, cada alerta vira um push no app [ntfy](https://ntfy.sh)
+(Android/iOS) com a foto ja anotada, prioridade alta e, se `PUBLIC_URL` estiver
+definido, toque e botao "Ao vivo" abrindo o painel. O envio roda em thread
+propria: internet lenta nao segura o video.
+
+1. Gere um topico aleatorio, por exemplo `camera-$(openssl rand -hex 8)`.
+2. Coloque `NTFY_URL=https://ntfy.sh/<topico>` no `.env`.
+3. No app ntfy: **+ > Subscribe to topic** com o mesmo nome.
+4. Teste com `/test`.
+
+Quem souber o nome do topico recebe as fotos: trate-o como senha. O push leva
+uma foto, nao video; o ao vivo e o link.
 
 ## Controle PTZ
 
@@ -167,7 +279,7 @@ A camera precisa aceitar o endpoint ONVIF configurado em `ptz.py`. O firmware po
 | `/audio` | Audio PCM da camera |
 | `/status` | Estado, deteccoes e eventos |
 | `/healthz` | Healthcheck interno |
-| `/test` | Notificacao de teste |
+| `/test` | Notificacao de teste (desktop e celular) |
 | `/ptz/<direcao>` | Movimento PTZ |
 | `/fotos/<nome>` | Fotos dos alertas |
 
@@ -205,6 +317,25 @@ Se o monitor estiver `connected: false`, confira nesta ordem:
 6. Se o host e WSL2: veja `Rodando em WSL2`. O sintoma tipico e o MediaMTX
    reconhecer as trilhas e logo depois registrar `UDP timeout` em loop.
 
+No Raspberry Pi:
+
+- Logs: `ssh pi@ssh-pi 'docker compose -f ~/camera-monitor/compose.pi.yaml logs -f'`.
+- Sem som com `CAM_PATH=onvif2`: falta `CAM_AUDIO_PATH=onvif1` (o substream nao
+  tem trilha de audio).
+- Borroes e `RTP packets lost` no log do MediaMTX: perda de UDP no Wi-Fi entre
+  camera e Pi. Cabo ou Pi mais perto do roteador resolvem.
+- `ssh ssh-pi` pedindo URL de login: a sessao do Cloudflare Access expirou. Rode
+  `cloudflared access login ssh-pi.seudominio.com` e aumente o *Session
+  Duration* da aplicacao no Zero Trust.
+
+## Limitacoes conhecidas
+
+- **Falar pela camera (audio bidirecional):** nao suportado. A camera (Yoosee)
+  anuncia `AudioOutputs = 0` no ONVIF; o alto-falante so e acessivel pelo
+  protocolo proprietario do app Yoosee.
+- **Pan irregular:** cada comando anda um passo de tamanho variavel e precisa de
+  ~3 s entre passos (detalhes em `ptz.py`).
+
 ## Testes
 
 Validar sintaxe:
@@ -226,8 +357,11 @@ python3 test_detect.py
 server.py                 Aplicacao Flask, stream, deteccao, audio e PTZ
 ptz.py                    Cliente ONVIF para movimento da camera
 Dockerfile                Imagem do monitor com FFmpeg e MediaMTX
+Dockerfile.pi             Imagem para Raspberry Pi 32 bits (armv7)
 compose.yaml              Monitor e Cloudflare Tunnel
+compose.pi.yaml           Monitor no Raspberry Pi (standalone)
 compose.wsl.yaml          Overlay para WSL2, com o MediaMTX no host Windows
+deploy-pi.sh              Comando forcado do deploy automatico no Pi
 docker-entrypoint.sh      Inicializa MediaMTX e o servidor Python
 start-mediamtx-windows.ps1  Relay MediaMTX no host Windows, so para WSL2
 .env.exemplo              Modelo de configuracao local
@@ -241,3 +375,4 @@ MobileNetSSD_deploy.*     Modelo MobileNet-SSD e configuracao Caffe
 - Use uma senha forte e exclusiva em `APP_PASS`.
 - Prefira Cloudflare Access para restringir o dominio a usuarios autorizados.
 - Revogue tokens que tenham sido compartilhados em chats, terminais ou commits antigos.
+- Use um topico ntfy aleatorio: ele e a unica protecao das fotos enviadas ao celular.

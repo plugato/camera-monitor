@@ -27,7 +27,10 @@ jobs:
         run: bash -n start.sh start-mediamtx.sh docker-entrypoint.sh
 
       - name: Validate Compose
-        run: docker compose config --quiet
+        run: |
+          cp .env.exemplo .env
+          docker compose config --quiet
+          docker compose -f compose.pi.yaml config --quiet
 
   container:
     runs-on: ubuntu-latest
@@ -36,3 +39,35 @@ jobs:
         uses: actions/checkout@v4
       - name: Build image
         run: docker build --tag camera-monitor:ci .
+
+  # Push na main com o CI verde: manda os arquivos do app para o Raspberry Pi
+  # pelo Cloudflare Tunnel. A chave so executa deploy-pi.sh la (comando forcado).
+  deploy-pi:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: deploy-pi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+
+      - name: Deploy
+        env:
+          PI_SSH_KEY: ${{ secrets.PI_SSH_KEY }}
+          PI_SSH_HOST: ${{ secrets.PI_SSH_HOST }}
+          PI_KNOWN_HOSTS: ${{ secrets.PI_KNOWN_HOSTS }}
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          install -m700 -d ~/.ssh
+          printf '%s\n' "$PI_SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s %s\n' "$PI_SSH_HOST" "$PI_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          tar -czf - Dockerfile.pi compose.pi.yaml server.py config.py ptz.py gunicorn.conf.py \
+              docker-entrypoint.sh MobileNetSSD_deploy.prototxt MobileNetSSD_deploy.caffemodel \
+            | ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+                -o ProxyCommand="cloudflared access ssh --hostname %h" "pi@$PI_SSH_HOST"

@@ -17,3 +17,7 @@ nohup.out
 
 # material dos testes de detecção (imagens de terceiros)
 teste/
+
+# certificado autoassinado que o MediaMTX gera ao rodar na raiz
+auto.crt
+auto.key

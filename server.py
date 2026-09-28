@@ -56,8 +56,8 @@ FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
 # A detecção roda em thread própria sobre o frame mais recente, então o vídeo não
 # trava enquanto ela pensa (num Pi 3 uma análise custa ~2,5s). Estes dois são o
 # botão de CPU: pausa entre análises e threads do OpenCV (0 = todas).
-DETECT_INTERVAL_S = float(os.environ.get("DETECT_INTERVAL_S", "0.4"))
-DETECT_THREADS = int(os.environ.get("DETECT_THREADS", "0"))
+DETECT_INTERVAL_S = float(os.environ.get("DETECT_INTERVAL_S") or "0.4")
+DETECT_THREADS = int(os.environ.get("DETECT_THREADS") or "0")
 CONFIDENCE_MIN = 0.65
 NOTIFY_COOLDOWN_S = 20         # antispam de toast, por categoria
 STREAK_MIN = 3                 # nº de análises consecutivas antes de notificar
