@@ -16,7 +16,6 @@ services:
     env_file: .env
     environment:
       MEDIAMTX_URL: rtsp://127.0.0.1:8554/camera
-      AUDIO_RTSP_URL: rtsp://127.0.0.1:8554/camera
     ports:
       - "127.0.0.1:8091:8090"
     volumes:

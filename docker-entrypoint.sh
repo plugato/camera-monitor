@@ -26,6 +26,13 @@ with open('/tmp/mediamtx.yml', 'w', encoding='ascii') as config:
     config.write('logLevel: info\npaths:\n  camera:\n')
     config.write(f'    source: {url}\n')
     config.write('    rtspTransport: udp\n')
+    # Substream sem audio (onvif2): o audio vem de outro caminho da camera, e so
+    # e puxado enquanto alguem escuta.
+    audio_path = os.environ.get('CAM_AUDIO_PATH', '').lstrip('/')
+    if audio_path:
+        config.write('  audio:\n')
+        config.write(f'    source: rtsp://{user}:{password}@{host}:{port}/{audio_path}\n')
+        config.write('    rtspTransport: udp\n    sourceOnDemand: yes\n')
 PY
 
 /usr/local/bin/mediamtx /tmp/mediamtx.yml > /tmp/mediamtx.log 2>&1 &
@@ -45,4 +52,7 @@ done
 
 export MEDIAMTX_URL="rtsp://127.0.0.1:8554/camera"
 export AUDIO_RTSP_URL="$MEDIAMTX_URL"
+if [ -n "${CAM_AUDIO_PATH:-}" ]; then
+    export AUDIO_RTSP_URL="rtsp://127.0.0.1:8554/audio"
+fi
 exec gunicorn -c gunicorn.conf.py server:app

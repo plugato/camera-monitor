@@ -51,6 +51,7 @@ HTTP_PORT = 8090
 APP_USER = os.environ.get("APP_USER", "")
 APP_PASS = os.environ.get("APP_PASS", "")
 NTFY_URL = os.environ.get("NTFY_URL", "")  # push no celular: https://ntfy.sh/<tópico-secreto>
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "")  # tocar no push abre o ao vivo
 FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
 # A detecção roda em thread própria sobre o frame mais recente, então o vídeo não
 # trava enquanto ela pensa (num Pi 3 uma análise custa ~2,5s). Estes dois são o
@@ -123,6 +124,9 @@ def phone_notify(title, msg, jpg=None):
                "Priority": "high", "Tags": "rotating_light"}
     if jpg:
         headers["Filename"] = "foto.jpg"
+    if PUBLIC_URL:
+        headers["Click"] = PUBLIC_URL
+        headers["Actions"] = f"view, Ao vivo, {PUBLIC_URL}"
 
     def send():
         try:
