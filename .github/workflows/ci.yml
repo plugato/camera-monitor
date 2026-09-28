@@ -57,6 +57,23 @@ jobs:
           curl -fsSL -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared.deb
 
+      # Sem isto, token recusado vira o cloudflared esperando login no navegador.
+      - name: Check Cloudflare Access service token
+        env:
+          PI_SSH_HOST: ${{ secrets.PI_SSH_HOST }}
+          CF_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          [ -n "$PI_SSH_HOST" ] || { echo "::error::secret PI_SSH_HOST vazio"; exit 1; }
+          [ -n "$CF_ID" ] && [ -n "$CF_SECRET" ] || { echo "::error::secrets CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET vazios"; exit 1; }
+          case "$CF_ID" in *.access) ;; *) echo "::error::CF_ACCESS_CLIENT_ID deve terminar em .access";; esac
+          loc=$(curl -s -o /dev/null -w '%{redirect_url}' -H "CF-Access-Client-Id: $CF_ID" \
+                -H "CF-Access-Client-Secret: $CF_SECRET" "https://$PI_SSH_HOST/")
+          case "$loc" in *cloudflareaccess.com*)
+            echo "::error::Access recusou o service token: confira se a aplicacao do $PI_SSH_HOST tem policy com Action=Service Auth incluindo este token"
+            exit 1;; esac
+          echo "service token aceito"
+
       - name: Deploy
         env:
           PI_SSH_KEY: ${{ secrets.PI_SSH_KEY }}
