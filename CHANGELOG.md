@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Deteccao so roda quando a cena muda (`MOTION_MIN`), com analise forcada a cada 10 s.
+- FFmpeg entrega quadros crus (YUV4MPEG) em vez de MJPEG: ~3x menos CPU no Pi 3.
 - Adicionado deploy automatico no Raspberry Pi a cada push na `main` (job `deploy-pi`).
 - Corrigido o CI: `Validate Compose` falhava sem `.env` no runner.
 - Adicionado deploy no Raspberry Pi 3 (`Dockerfile.pi`, `compose.pi.yaml`), sem PC ligado.

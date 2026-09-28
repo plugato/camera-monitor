@@ -8,6 +8,7 @@ http://localhost:8090 e dispara uma notificação desktop.
 
 import hashlib
 import hmac
+import io
 import json
 import os
 import queue
@@ -58,6 +59,11 @@ FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
 # botão de CPU: pausa entre análises e threads do OpenCV (0 = todas).
 DETECT_INTERVAL_S = float(os.environ.get("DETECT_INTERVAL_S") or "0.4")
 DETECT_THREADS = int(os.environ.get("DETECT_THREADS") or "0")
+# Só roda o MobileNet quando a cena muda: fração de pixels (miniatura 160x90)
+# que precisa mudar. 0 desliga o filtro. Parado, analisa mesmo assim a cada
+# MOTION_IDLE_S para não perder quem ficou imóvel.
+MOTION_MIN = float(os.environ.get("MOTION_MIN") or "0.002")
+MOTION_IDLE_S = 10
 CONFIDENCE_MIN = 0.65
 NOTIFY_COOLDOWN_S = 20         # antispam de toast, por categoria
 STREAK_MIN = 3                 # nº de análises consecutivas antes de notificar
@@ -255,17 +261,19 @@ def vlc_frames():
             command = vlc_command + ["-I", "dummy", "--no-audio", "--rtsp-tcp",
                        RTSP_URL, ":sout=#transcode{vcodec=MJPG,acodec=none,fps=8}"
                        ":standard{access=file,mux=mpjpeg,dst=-}"]
-        elif VIDEO_BACKEND == "mediamtx":
-            command = [FFMPEG_EXE, "-hide_banner", "-loglevel", "error",
-                       "-rtsp_transport", "tcp", "-i", MEDIAMTX_URL,
-                       "-map", "0:v:0", "-an", "-vf", "fps=8",
-                       "-f", "mpjpeg", "-q:v", "5", "pipe:1"]
+            use_vlc = True
         else:
+            # Quadros crus (YUV4MPEG): sem codificar JPEG no FFmpeg só para o
+            # Python decodificar de volta. O cabeçalho traz a resolução.
+            src = MEDIAMTX_URL if VIDEO_BACKEND == "mediamtx" else RTSP_URL
             command = [FFMPEG_EXE, "-hide_banner", "-loglevel", "error",
-                       "-rtsp_transport", "tcp", "-i", RTSP_URL, "-an",
-                       "-vf", "fps=8", "-f", "mpjpeg", "-q:v", "5", "pipe:1"]
+                       "-rtsp_transport", "tcp", "-i", src, "-map", "0:v:0", "-an",
+                       "-vf", "fps=8", "-pix_fmt", "yuv420p",
+                       "-f", "yuv4mpegpipe", "pipe:1"]
+            use_vlc = False
+        # mjpeg lê em pedaços (bufsize=0); y4m lê quadros de tamanho exato
         proc = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, bufsize=0)
+                                stderr=subprocess.DEVNULL, bufsize=0 if use_vlc else -1)
         state["video_proc"] = proc
         last = [time.time()]
 
@@ -276,41 +284,78 @@ def vlc_frames():
                     return
                 time.sleep(1)
         threading.Thread(target=watchdog, daemon=True).start()
-        buf = b""
         try:
-            while True:
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                buf = (buf + chunk)[-4_000_000:]
-                while True:
-                    soi = buf.find(b"\xff\xd8")
-                    eoi = buf.find(b"\xff\xd9", soi + 2) if soi != -1 else -1
-                    if eoi == -1:
-                        break
-                    jpg, buf = buf[soi:eoi + 2], buf[eoi + 2:]
-                    frame = cv2.imdecode(np.frombuffer(jpg, np.uint8),
-                                         cv2.IMREAD_COLOR)
-                    if frame is not None:
-                        last[0] = time.time()
-                        state["connected"] = True
-                        yield frame
+            for frame in (mjpeg_frames if use_vlc else y4m_frames)(proc.stdout):
+                last[0] = time.time()
+                state["connected"] = True
+                yield frame
         finally:
             kill_video(proc)
         state["connected"] = False
         time.sleep(2)
 
 
+def mjpeg_frames(stream):
+    buf = b""
+    while True:
+        chunk = stream.read(65536)
+        if not chunk:
+            return
+        buf = (buf + chunk)[-4_000_000:]
+        while True:
+            soi = buf.find(b"\xff\xd8")
+            eoi = buf.find(b"\xff\xd9", soi + 2) if soi != -1 else -1
+            if eoi == -1:
+                break
+            jpg, buf = buf[soi:eoi + 2], buf[eoi + 2:]
+            frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+            if frame is not None:
+                yield frame
+
+
+def y4m_frames(stream):
+    """Quadros BGR de um fluxo YUV4MPEG2 4:2:0 (buffered: read(n) vem inteiro)."""
+    header = stream.readline()
+    if not header.startswith(b"YUV4MPEG2"):
+        return
+    params = {p[:1]: p[1:] for p in header.split()[1:]}
+    w, h = int(params[b"W"]), int(params[b"H"])
+    size = w * h * 3 // 2
+    while stream.readline().startswith(b"FRAME"):
+        data = stream.read(size)
+        if len(data) < size:
+            return
+        yuv = np.frombuffer(data, np.uint8).reshape(h * 3 // 2, w)
+        yield cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
+
+
 detect_slot = {"frame": None, "dets": [], "fired": []}
 detect_ready = threading.Event()
 
 
+def motion_thumb(frame):
+    small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+    return cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+
+
+def moved(ref, thumb):
+    """A cena mudou desde a última análise? (ruído de compressão fica abaixo de 20)"""
+    if ref is None or MOTION_MIN <= 0:
+        return True
+    return np.count_nonzero(cv2.absdiff(ref, thumb) > 20) > MOTION_MIN * thumb.size
+
+
 def detect_loop():
+    ref, last_run = None, 0.0
     while True:
         detect_ready.wait()
         detect_ready.clear()
         with lock:
             frame = detect_slot["frame"]
+        thumb = motion_thumb(frame)
+        if not moved(ref, thumb) and time.time() - last_run < MOTION_IDLE_S:
+            continue  # cena parada: não gasta o MobileNet
+        ref, last_run = thumb, time.time()
         dets = drop_static(detect(frame))
         fired = maybe_notify(dets)  # sempre, para zerar streaks quando a cena esvazia
         with lock:
@@ -760,6 +805,15 @@ def _selfcheck():
     assert drop_static([], now=STATIC_AFTER_S + 3) == []             # carro oscilou
     assert drop_static([car], now=STATIC_AFTER_S + 10) == []         # continua parado
     tracked = []
+    y4m = io.BytesIO(b"YUV4MPEG2 W4 H2 F8:1 Ip A1:1 C420jpeg\n"
+                     + (b"FRAME\n" + bytes(12)) * 2 + b"FRAME\n" + bytes(5))
+    assert [f.shape for f in y4m_frames(y4m)] == [(2, 4, 3), (2, 4, 3)]  # truncado cai
+    still = np.full((360, 640, 3), 90, np.uint8)
+    walk = still.copy()
+    walk[150:250, 300:340] = 240                                     # alguém entrou
+    assert moved(None, motion_thumb(still))
+    assert not moved(motion_thumb(still), motion_thumb(still))
+    assert moved(motion_thumb(still), motion_thumb(walk))
     assert ALAW[0x55] == -8 and ALAW[0xD5] == 8 and ALAW[0x2A] == -32256 and ALAW[0xAA] == 32256
 
 

@@ -84,6 +84,7 @@ Variaveis opcionais:
 | `PUBLIC_URL` | vazio | Endereco publico do painel; tocar na notificacao abre o ao vivo |
 | `DETECT_THREADS` | `0` (todas) | Threads do OpenCV na deteccao |
 | `DETECT_INTERVAL_S` | `0.4` | Pausa minima entre duas analises |
+| `MOTION_MIN` | `0.002` | Fracao da cena que precisa mudar para rodar o MobileNet; `0` analisa sempre |
 | `WINDOWS_HOST` | vazio | So para WSL2, com `compose.wsl.yaml` |
 
 O arquivo `.env` e ignorado pelo Git. Nunca coloque credenciais diretamente em `compose.yaml`, no codigo ou em commits.
@@ -151,8 +152,12 @@ direto e nenhum PC precisa ficar ligado. Testado num Raspberry Pi 3 Model B
   `CAM_AUDIO_PATH=onvif1`: o MediaMTX puxa o audio do stream principal so
   enquanto alguem escuta.
 - Uma analise do MobileNet-SSD custa ~2,5 s no Pi 3. A deteccao roda em thread
-  propria sobre o frame mais recente, entao o video nao trava; com
-  `DETECT_THREADS=2` e `DETECT_INTERVAL_S=1` sobra ~50% de CPU.
+  propria sobre o frame mais recente, entao o video nao trava, e so quando a
+  cena muda (`MOTION_MIN`; parada, analisa a cada 10 s mesmo assim).
+- O FFmpeg entrega quadros crus (YUV4MPEG) em vez de MJPEG: no Pi 3 isso caiu
+  de 66% para 21% de um nucleo.
+- Sem dissipador o Pi 3 chega a ~83 C e o firmware reduz o clock
+  (`vcgencmd get_throttled` diferente de `0x0`). Use dissipador com cooler.
 
 `.env` do Pi, alem das credenciais:
 
@@ -160,7 +165,7 @@ direto e nenhum PC precisa ficar ligado. Testado num Raspberry Pi 3 Model B
 CAM_PATH=onvif2
 CAM_AUDIO_PATH=onvif1
 DETECT_THREADS=2
-DETECT_INTERVAL_S=1
+DETECT_INTERVAL_S=2
 NTFY_URL=https://ntfy.sh/<topico-secreto>
 PUBLIC_URL=https://camera.seudominio.com/
 ```

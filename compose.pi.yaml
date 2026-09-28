@@ -3,7 +3,7 @@
 #
 # - Pi 3 nao decodifica o H265 1080p em tempo real: use CAM_PATH=onvif2
 #   (substream 640x360) no .env. A deteccao custa ~2,5s por analise la; com
-#   DETECT_THREADS=2 e DETECT_INTERVAL_S=1 sobra ~50% de CPU para o resto.
+#   DETECT_THREADS=2 e DETECT_INTERVAL_S=2 e o filtro de movimento, sobra CPU.
 # - A porta 8090 do host ja esta em uso no Pi, por isso 8091.
 # - Sem container cloudflared: o Pi ja roda o cloudflared como servico. Publique
 #   um hostname apontando para http://localhost:8091 no painel do tunnel.
