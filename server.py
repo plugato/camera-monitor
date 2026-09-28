@@ -595,7 +595,7 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
   body.so-pip header h1,body.so-pip .lista{display:none}
   body.so-pip main{grid-template-columns:1fr;padding:8px}
 </style></head><body>
-<header><h1>📷 Monitor da Câmera</h1>
+<header><h1>📷 Monitor da Câmera <span style="color:#9ca3af;font-weight:400">· Raspberry Pi</span></h1>
 <button id="pip" title="Painel flutuante por cima de tudo, com todos os controles">🗗 PiP</button></header>
 <main>
   <!-- #painel é movido inteiro para a janela de PiP: os controles vão junto, com
