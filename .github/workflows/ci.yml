@@ -81,12 +81,19 @@ jobs:
           PI_KNOWN_HOSTS: ${{ secrets.PI_KNOWN_HOSTS }}
           TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          # .env do Pi guardado no GitHub: cartao SD novo volta com um deploy.
+          # Vazio = nao manda, e o .env que ja esta no Pi fica como esta.
+          PI_ENV_FILE: ${{ secrets.PI_ENV_FILE }}
         run: |
           install -m700 -d ~/.ssh
           printf '%s\n' "$PI_SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
           printf '%s %s\n' "$PI_SSH_HOST" "$PI_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          env_file=
+          if [ -n "$PI_ENV_FILE" ]; then
+            (umask 077; printf '%s\n' "$PI_ENV_FILE" > .env) && env_file=.env
+          fi
           tar -czf - Dockerfile.pi compose.pi.yaml server.py config.py ptz.py gunicorn.conf.py \
-              docker-entrypoint.sh MobileNetSSD_deploy.prototxt MobileNetSSD_deploy.caffemodel \
+              docker-entrypoint.sh MobileNetSSD_deploy.prototxt MobileNetSSD_deploy.caffemodel $env_file \
             | timeout 600 ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
                 -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 \
                 -o ProxyCommand="cloudflared access ssh --hostname %h" "pi@$PI_SSH_HOST"
