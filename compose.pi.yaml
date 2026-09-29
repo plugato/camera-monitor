@@ -2,8 +2,11 @@
 #   docker compose -f compose.pi.yaml up -d --build
 #
 # - Pi 3 nao decodifica o H265 1080p em tempo real: use CAM_PATH=onvif2
-#   (substream 640x360) no .env. A deteccao custa ~2,5s por analise la; com
-#   DETECT_THREADS=2 e DETECT_INTERVAL_S=2 e o filtro de movimento, sobra CPU.
+#   (substream 640x360) no .env.
+# - DETECT_*: aqui e nao no .env (sobrepoem o de la). Com chuva o filtro de
+#   movimento deixa o MobileNet rodar sem parar; com 2 threads ele tomava a CPU
+#   do FFmpeg e o video congelava. Com 1 thread tudo roda na thread de deteccao,
+#   que fica em nice 10: sem CPU sobrando, atrasa a deteccao, nao o video.
 # - A porta 8090 do host ja esta em uso no Pi, por isso 8091.
 # - Sem container cloudflared: o Pi ja roda o cloudflared como servico. Publique
 #   um hostname apontando para http://localhost:8091 no painel do tunnel.
@@ -16,6 +19,8 @@ services:
     env_file: .env
     environment:
       MEDIAMTX_URL: rtsp://127.0.0.1:8554/camera
+      DETECT_THREADS: "1"
+      DETECT_INTERVAL_S: "0.5"
     ports:
       - "127.0.0.1:8091:8090"
     volumes:

@@ -63,6 +63,7 @@ FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
 # botão de CPU: pausa entre análises e threads do OpenCV (0 = todas).
 DETECT_INTERVAL_S = float(os.environ.get("DETECT_INTERVAL_S") or "0.4")
 DETECT_THREADS = int(os.environ.get("DETECT_THREADS") or "0")
+DETECT_NICE = int(os.environ.get("DETECT_NICE") or "10")
 # Só roda o MobileNet quando a cena muda: fração de pixels (miniatura 160x90)
 # que precisa mudar. 0 desliga o filtro. Parado, analisa mesmo assim a cada
 # MOTION_IDLE_S para não perder quem ficou imóvel.
@@ -390,6 +391,12 @@ def moved(ref, thumb):
 
 
 def detect_loop():
+    # Prioridade baixa só nesta thread (Linux): se a CPU não der para tudo, quem
+    # atrasa é a detecção, não o FFmpeg — senão ele fica para trás no H265 e o
+    # MediaMTX derruba a sessão (vídeo congelado). Com DETECT_THREADS=1 o
+    # MobileNet roda inteiro aqui; com mais, os workers do TBB ficam em nice 0.
+    if hasattr(os, "setpriority"):
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), DETECT_NICE)
     ref, last_run = None, 0.0
     while True:
         detect_ready.wait()
