@@ -305,11 +305,22 @@ def vlc_frames():
                     return
                 time.sleep(1)
         threading.Thread(target=watchdog, daemon=True).start()
-        try:
+        # Drena o pipe numa thread e guarda só o quadro mais novo: se o resto
+        # não der conta dos 8 fps (Pi 3 com a detecção rodando), pula quadros em
+        # vez de acumular atraso no pipe — já chegou a 30 min de vídeo velho.
+        newest = queue.Queue(maxsize=1)
+
+        def reader():
             for frame in (mjpeg_frames if use_vlc else y4m_frames)(proc.stdout):
                 last[0] = time.time()
+                put_newest(newest, frame)
+            put_newest(newest, None)
+        threading.Thread(target=reader, daemon=True).start()
+        try:
+            while (frame := newest.get()) is not None:
                 state["connected"] = True
-                yield frame
+                yield frame if frame.ndim == 3 else cv2.cvtColor(
+                    frame, cv2.COLOR_YUV2BGR_I420)
         finally:
             kill_video(proc)
         state["connected"] = False
@@ -334,8 +345,21 @@ def mjpeg_frames(stream):
                 yield frame
 
 
+def put_newest(q, item):
+    """Põe item na fila de 1 lugar, descartando o que estiver lá (um produtor só)."""
+    while True:
+        try:
+            return q.put_nowait(item)
+        except queue.Full:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+
+
 def y4m_frames(stream):
-    """Quadros BGR de um fluxo YUV4MPEG2 4:2:0 (buffered: read(n) vem inteiro)."""
+    """Quadros I420 crus (h*3/2 x w) de um fluxo YUV4MPEG2; a conversão para BGR
+    fica para quem consome, só nos quadros que não forem descartados."""
     header = stream.readline()
     if not header.startswith(b"YUV4MPEG2"):
         return
@@ -346,8 +370,7 @@ def y4m_frames(stream):
         data = stream.read(size)
         if len(data) < size:
             return
-        yuv = np.frombuffer(data, np.uint8).reshape(h * 3 // 2, w)
-        yield cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
+        yield np.frombuffer(data, np.uint8).reshape(h * 3 // 2, w)
 
 
 detect_slot = {"frame": None, "dets": [], "fired": []}
@@ -828,7 +851,11 @@ def _selfcheck():
     tracked = []
     y4m = io.BytesIO(b"YUV4MPEG2 W4 H2 F8:1 Ip A1:1 C420jpeg\n"
                      + (b"FRAME\n" + bytes(12)) * 2 + b"FRAME\n" + bytes(5))
-    assert [f.shape for f in y4m_frames(y4m)] == [(2, 4, 3), (2, 4, 3)]  # truncado cai
+    assert [f.shape for f in y4m_frames(y4m)] == [(3, 4), (3, 4)]  # truncado cai
+    q = queue.Queue(maxsize=1)
+    for i in range(5):                                               # consumidor lento
+        put_newest(q, i)
+    assert q.get_nowait() == 4 and q.empty()                         # só o mais novo
     still = np.full((360, 640, 3), 90, np.uint8)
     walk = still.copy()
     walk[150:250, 300:340] = 240                                     # alguém entrou
