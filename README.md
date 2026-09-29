@@ -224,7 +224,7 @@ Configuracao, uma vez:
 
 O `.env` do Pi nao passa pelo GitHub: continua so no Pi.
 
-A aplicacao exige `APP_USER` e `APP_PASS`. O endpoint `/healthz` fica disponivel apenas para o healthcheck interno do Docker.
+A aplicacao exige `APP_USER` e `APP_PASS`, ou, atras do Cloudflare Access, `CF_ACCESS_TEAM` e `CF_ACCESS_AUD`: ai vale so o login do Access (o JWT de cada requisicao e validado) e nao ha segunda senha. O endpoint `/healthz` fica disponivel apenas para o healthcheck interno do Docker.
 
 ## Cloudflare Tunnel
 

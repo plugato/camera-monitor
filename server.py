@@ -51,6 +51,10 @@ CAM_HOST = config.CAM_HOST
 HTTP_PORT = 8090
 APP_USER = os.environ.get("APP_USER", "")
 APP_PASS = os.environ.get("APP_PASS", "")
+# Atrás do Cloudflare Access: com os dois definidos, o login é só o do Access
+# (JWT do header Cf-Access-Jwt-Assertion) e APP_USER/APP_PASS deixam de valer.
+CF_ACCESS_TEAM = os.environ.get("CF_ACCESS_TEAM", "")  # <team>.cloudflareaccess.com
+CF_ACCESS_AUD = os.environ.get("CF_ACCESS_AUD", "")    # Application Audience (AUD) tag
 NTFY_URL = os.environ.get("NTFY_URL", "")  # push no celular: https://ntfy.sh/<tópico-secreto>
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")  # tocar no push abre o ao vivo
 FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
@@ -101,11 +105,28 @@ state = {
 }
 lock = threading.Lock()
 
+if CF_ACCESS_TEAM and CF_ACCESS_AUD:
+    import jwt
+    cf_jwks = jwt.PyJWKClient(
+        f"https://{CF_ACCESS_TEAM}.cloudflareaccess.com/cdn-cgi/access/certs")
+
+
+def cf_access_ok():
+    token = request.headers.get("Cf-Access-Jwt-Assertion", "")
+    try:
+        key = cf_jwks.get_signing_key_from_jwt(token).key
+        jwt.decode(token, key, algorithms=["RS256"], audience=CF_ACCESS_AUD)
+        return True
+    except jwt.PyJWTError:
+        return False
+
 
 @app.before_request
 def require_login():
     if request.path == "/healthz":
         return None
+    if CF_ACCESS_TEAM and CF_ACCESS_AUD:
+        return None if cf_access_ok() else ("acesso pelo Cloudflare Access", 403)
     auth = request.authorization
     valid = (auth is not None
              and hmac.compare_digest(auth.username, APP_USER)
