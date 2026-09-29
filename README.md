@@ -222,7 +222,7 @@ Configuracao, uma vez:
    | `CF_ACCESS_CLIENT_ID` | Client ID do service token |
    | `CF_ACCESS_CLIENT_SECRET` | Client Secret do service token |
 
-O `.env` do Pi fica no secret `PI_ENV_FILE` (conteudo inteiro do arquivo) e vai junto em cada deploy, com permissao 600: se o cartao SD morrer, um deploy recria tudo. Com o secret vazio o deploy nao mexe no `.env` que ja esta no Pi. Para mudar uma variavel, edite o secret (o GitHub nao deixa ler de volta: guarde uma copia num gerenciador de senhas) e rode o deploy de novo.
+O `.env` do Pi fica no secret `PI_ENV_FILE` (conteudo inteiro do arquivo) e vai junto em cada deploy, com permissao 600: se o cartao SD morrer, um deploy recria tudo. Com o secret vazio o deploy nao mexe no `.env` que ja esta no Pi. Para mudar uma variavel, edite o secret (o GitHub nao deixa ler de volta: guarde uma copia num gerenciador de senhas) e rode o deploy de novo (Actions > CI > Run workflow).
 
 A aplicacao exige `APP_USER` e `APP_PASS`, ou, atras do Cloudflare Access, `CF_ACCESS_TEAM` e `CF_ACCESS_AUD`: ai vale so o login do Access (o JWT de cada requisicao e validado) e nao ha segunda senha. O endpoint `/healthz` fica disponivel apenas para o healthcheck interno do Docker.
 

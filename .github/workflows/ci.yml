@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:  # redeploy manual, ex.: depois de editar o secret PI_ENV_FILE
 
 jobs:
   validate:
@@ -44,7 +45,7 @@ jobs:
   # pelo Cloudflare Tunnel. A chave so executa deploy-pi.sh la (comando forcado).
   deploy-pi:
     needs: validate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency: deploy-pi
     timeout-minutes: 15
