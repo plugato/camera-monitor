@@ -478,6 +478,12 @@ def rtsp_audio():
             s = socket.create_connection((host, int(port)), timeout=5)
             cseq, auth, pend = [0], {}, [b""]
 
+            def rx():  # recv() devolve b"" quando o outro lado fecha: sem isso o laço gira a 100% de CPU
+                d = s.recv(65536)
+                if not d:
+                    raise OSError("RTSP: conexão fechada")
+                return d
+
             def req(method, target, extra=""):
                 cseq[0] += 1
                 hdr = ""
@@ -497,13 +503,13 @@ def rtsp_audio():
                         buf = buf[4 + n:]
                     if buf.startswith(b"RTSP") and b"\r\n\r\n" in buf:
                         break
-                    buf += s.recv(65536)
+                    buf += rx()
                 head, _, rest = buf.partition(b"\r\n\r\n")
                 head = head.decode(errors="replace")
                 m = re.search(r"Content-Length: (\d+)", head)
                 n = int(m.group(1)) if m else 0
                 while len(rest) < n:
-                    rest += s.recv(65536)
+                    rest += rx()
                 pend[0] = rest[n:]
                 return head
 
@@ -532,7 +538,7 @@ def rtsp_audio():
                 if time.time() - keep > 30:  # sessão expira em 60 s sem requisição
                     keep = time.time()
                     s.sendall(f"OPTIONS {url} RTSP/1.0\r\nCSeq: 99\r\nSession: {sess}\r\n\r\n".encode())
-                buf += s.recv(65536)
+                buf += rx()
                 while True:
                     if buf.startswith(b"RTSP"):       # resposta do OPTIONS no meio do fluxo
                         i = buf.find(b"\r\n\r\n")
@@ -584,7 +590,10 @@ def audio():
     def gen():
         try:
             while True:
-                yield q.get()
+                try:
+                    yield q.get(timeout=1)
+                except queue.Empty:  # sem áudio, manda silêncio: só escrevendo se percebe que o cliente saiu
+                    yield bytes(AUDIO_RATE // 25)  # 20 ms de PCM16
         finally:
             audio_clients.discard(q)
     return Response(gen(), mimetype="application/octet-stream")
