@@ -639,11 +639,135 @@ def test():
     return "ok, notificação simulada"
 
 
+# ------------------------------------------------------------ PTZ e posições
+# A câmera não informa onde está, e o passo é irregular (direita anda mais que
+# esquerda). Então a posição é contada em px da miniatura 320x180 com o passo
+# médio de cada direção, e cada posição salva guarda também a miniatura: ao
+# voltar, anda pela conta e acerta o resto comparando a imagem (phaseCorrelate).
+PRESETS_DIR = os.path.join(FOTOS_DIR, ".presets")  # oculto: fora do /test
+PRESETS_JSON = os.path.join(PRESETS_DIR, "presets.json")
+PASSO_PX = {"direita": 25, "esquerda": 15, "cima": 15, "baixo": 15}  # medido no Pi
+VIDEO_ATRASO_S = 2.5           # o quadro que chega reflete o passo ~2s depois
+ptz_lock = threading.Lock()
+ptz_state = {"pos": [0.0, 0.0], "presets": {}, "indo": None}
+try:
+    with open(PRESETS_JSON) as f:
+        ptz_state.update(json.load(f))
+except (OSError, ValueError):
+    pass
+
+
+def ptz_salvar():
+    os.makedirs(PRESETS_DIR, exist_ok=True)
+    with open(PRESETS_JSON + ".tmp", "w") as f:
+        json.dump({"pos": ptz_state["pos"], "presets": ptz_state["presets"]}, f)
+    os.replace(PRESETS_JSON + ".tmp", PRESETS_JSON)
+
+
+def ptz_passo(direcao):
+    with ptz_lock:
+        ptz.mover(direcao)
+        x, y = ptz.VELOCIDADE[direcao]
+        ptz_state["pos"][0] += x * PASSO_PX[direcao]
+        ptz_state["pos"][1] += y * PASSO_PX[direcao]
+        ptz_salvar()
+
+
+def miniatura(frame):
+    return cv2.cvtColor(cv2.resize(frame, (320, 180), interpolation=cv2.INTER_AREA),
+                        cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+
+def falta_andar(ref, atual):
+    """(x, y, confiança): quanto a câmera precisa andar, em px da miniatura
+    (+x = direita, +y = cima), para a imagem atual virar a de referência."""
+    (dx, dy), conf = cv2.phaseCorrelate(ref, atual)
+    return dx, -dy, conf
+
+
+def rumo(ex, ey):
+    """Direção do próximo passo, ou None se já está a menos de meio passo."""
+    if abs(ex) > PASSO_PX["esquerda"] / 2:
+        return "direita" if ex > 0 else "esquerda"
+    if abs(ey) > PASSO_PX["cima"] / 2:
+        return "cima" if ey > 0 else "baixo"
+    return None
+
+
+def ptz_ir(nome):
+    alvo = ptz_state["presets"][nome]
+    eu = object()
+    ptz_state["indo"] = eu     # um movimento manual (ou outra ida) cancela esta
+    for _ in range(80):        # grosso: pela posição contada
+        pos = ptz_state["pos"]
+        d = rumo(alvo["pos"][0] - pos[0], alvo["pos"][1] - pos[1])
+        if d is None or ptz_state["indo"] is not eu:
+            break
+        ptz_passo(d)
+    ref = cv2.imread(os.path.join(PRESETS_DIR, alvo["img"]), cv2.IMREAD_GRAYSCALE)
+    for _ in range(10):        # fino: pela imagem salva
+        time.sleep(VIDEO_ATRASO_S)
+        with lock:
+            frame = detect_slot["frame"]
+        if ref is None or frame is None or ptz_state["indo"] is not eu:
+            break
+        ex, ey, conf = falta_andar(ref.astype(np.float32), miniatura(frame))
+        if conf < 0.05:        # cena mudou demais (noite, chuva): fica na conta
+            break
+        ptz_state["pos"] = [alvo["pos"][0] - ex, alvo["pos"][1] - ey]  # recalibra
+        d = rumo(ex, ey)
+        if d is None:
+            break
+        ptz_passo(d)
+    if ptz_state["indo"] is eu:
+        ptz_state["indo"] = None
+
+
 @app.route("/ptz/<direcao>", methods=["POST"])
 def ptz_http(direcao):
     if direcao not in ptz.VELOCIDADE:
         return "direção inválida", 400
-    ptz.mover(direcao)
+    ptz_state["indo"] = None
+    ptz_passo(direcao)
+    return "ok"
+
+
+NOME_POSICAO = re.compile(r"[\w ,.-]{1,30}")  # vira texto de botão: sem < > & "
+
+
+@app.route("/posicoes")
+def posicoes():
+    return jsonify(sorted(ptz_state["presets"]))
+
+
+@app.route("/posicoes/<nome>", methods=["PUT", "POST", "DELETE"])
+def posicao(nome):
+    nome = nome.strip()
+    if not NOME_POSICAO.fullmatch(nome):
+        return "nome inválido", 400
+    if request.method == "DELETE":
+        alvo = ptz_state["presets"].pop(nome, None)
+        if alvo:
+            try:
+                os.remove(os.path.join(PRESETS_DIR, alvo["img"]))
+            except OSError:
+                pass
+            ptz_salvar()
+        return "ok"
+    if request.method == "POST":  # ir
+        if nome not in ptz_state["presets"]:
+            return "posição não existe", 404
+        threading.Thread(target=ptz_ir, args=(nome,), daemon=True).start()
+        return "ok"
+    with lock:                    # PUT: salvar a posição atual
+        frame = detect_slot["frame"]
+    if frame is None:
+        return "sem vídeo", 503
+    img = hashlib.sha1(nome.encode()).hexdigest()[:12] + ".png"
+    os.makedirs(PRESETS_DIR, exist_ok=True)
+    cv2.imwrite(os.path.join(PRESETS_DIR, img), miniatura(frame).astype(np.uint8))
+    ptz_state["presets"][nome] = {"pos": list(ptz_state["pos"]), "img": img}
+    ptz_salvar()
     return "ok"
 
 
@@ -690,7 +814,11 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
         padding:16px 7px;font-size:15px;opacity:.35;transition:opacity .15s}
   .cam:hover .seta{opacity:.9}
   .seta:active{background:#1d4ed8}
-  .seta:disabled{opacity:.15;cursor:wait}
+  .seta{touch-action:none;user-select:none;-webkit-user-select:none}
+  #pos{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  #pos button{background:#374151;color:#e5e7eb;border:0;border-radius:6px;padding:4px 9px;cursor:pointer}
+  #pos .x{padding:4px 6px;margin-left:-6px;border-radius:0 6px 6px 0;color:#9ca3af}
+  #pos .ir{border-radius:6px 0 0 6px}
   .esq{left:6px} .dir{right:6px}
     .cima{top:6px;left:50%;transform:translateX(-50%)}
     .baixo{top:auto;bottom:6px;left:50%;transform:translateX(-50%)}
@@ -718,6 +846,7 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
             <button class="seta baixo" data-d="baixo" title="inclinar para baixo">▼</button>
       <div id="now"></div>
     </div>
+    <div id="pos"></div>
   </div>
   <div class="lista">
     <section><h2>Notificações</h2>
@@ -807,20 +936,45 @@ function audioNoAlerta(){
 if(localStorage.getItem('cam')==='1'){ au.title='clique para reativar o áudio'; }
 document.addEventListener('click',()=>{ if(!auAbort && localStorage.getItem('cam')==='1'){ camAudio(true); setAu(true); }
   if(localStorage.getItem('aual')==='1'){ actx=actx||new AudioContext(); actx.resume(); } });
-// PTZ: botões da página e, no PiP, os controles de mídia ⏮ ⏭ (lá não há DOM)
-let ptzOcupado=false;
+// PTZ: segurar a seta anda sem parar (um passo por vez, ~0,75s cada); um
+// clique é um passo. No PiP, os controles de mídia ⏮ ⏭ (lá não há DOM).
+let segurando=null;
 async function girar(d){
-  if(ptzOcupado) return;
-  ptzOcupado=true; painel.querySelectorAll('.seta').forEach(b=>b.disabled=true);
-  try{ await fetch('/ptz/'+d,{method:'POST'}); }catch(e){}
-  // a câmera engole comando que chega com o motor andando: um passo leva ~3s
-  setTimeout(()=>{ ptzOcupado=false; painel.querySelectorAll('.seta').forEach(b=>b.disabled=false); },3000);
+  segurando=d;
+  do{ try{ await fetch('/ptz/'+d,{method:'POST'}); }catch(e){ break; } }while(segurando===d);
 }
-painel.querySelectorAll('.seta').forEach(b=>b.onclick=()=>girar(b.dataset.d));
+function passo(d){ girar(d); segurando=null; }
+painel.querySelectorAll('.seta').forEach(b=>{
+  b.onpointerdown=e=>{ e.preventDefault(); girar(b.dataset.d); };
+  b.onpointerup=b.onpointerleave=b.onpointercancel=()=>{ segurando=null; };
+  b.oncontextmenu=e=>e.preventDefault();   // segurar no celular não abre menu
+});
+// posições salvas: ir, apagar (×) e salvar a atual (＋)
+const elPos=document.getElementById('pos');
+async function posicoes(){
+  try{
+    const l=await (await fetch('/posicoes')).json();
+    elPos.innerHTML=l.map(n=>`<span><button class="ir" data-n="${n}" title="ir para ${n}">📍 ${n}</button><button class="x" data-n="${n}" title="apagar ${n}">×</button></span>`).join('')
+      +'<button id="salvar" title="salvar a posição atual da câmera">＋ posição</button>';
+  }catch(e){}
+}
+elPos.onclick=async e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  const url=n=>'/posicoes/'+encodeURIComponent(n);
+  if(b.id==='salvar'){
+    const n=(prompt('Nome da posição (ex.: portão, garagem):')||'').trim(); if(!n) return;
+    const r=await fetch(url(n),{method:'PUT'}); if(!r.ok) alert(await r.text());
+  }else if(b.classList.contains('x')){
+    if(!confirm('Apagar a posição "'+b.dataset.n+'"?')) return;
+    await fetch(url(b.dataset.n),{method:'DELETE'});
+  }else{ segurando=null; await fetch(url(b.dataset.n),{method:'POST'}); }
+  posicoes();
+};
+posicoes();
 if('mediaSession' in navigator){
   navigator.mediaSession.metadata=new MediaMetadata({title:'Monitor da Câmera',artist:'⏮ ⏭ giram a câmera'});
-  navigator.mediaSession.setActionHandler('previoustrack',()=>girar('esquerda'));
-  navigator.mediaSession.setActionHandler('nexttrack',()=>girar('direita'));
+  navigator.mediaSession.setActionHandler('previoustrack',()=>passo('esquerda'));
+  navigator.mediaSession.setActionHandler('nexttrack',()=>passo('direita'));
 }
 // PiP: janela flutuante com o painel inteiro dentro (Document PiP).
 // Movemos o nó real do painel para lá e o trazemos de volta ao fechar.
@@ -878,6 +1032,14 @@ def _selfcheck():
     assert moved(None, motion_thumb(still))
     assert not moved(motion_thumb(still), motion_thumb(still))
     assert moved(motion_thumb(still), motion_thumb(walk))
+    big = np.random.default_rng(1).random((400, 700)).astype(np.float32)
+    big = cv2.GaussianBlur(big, (0, 0), 3)
+    ref = big[50:230, 100:420]                                       # posição salva
+    ex, ey, conf = falta_andar(ref, big[50:230, 120:440])            # câmera 20px à direita
+    assert abs(ex + 20) < 1 and abs(ey) < 1 and conf > 0.3 and rumo(ex, ey) == "esquerda"
+    ex, ey, _ = falta_andar(ref, big[60:240, 100:420])               # 10px abaixo
+    assert abs(ey - 10) < 1 and rumo(ex, ey) == "cima"
+    assert rumo(*falta_andar(ref, ref)[:2]) is None                  # já está lá
     assert ALAW[0x55] == -8 and ALAW[0xD5] == 8 and ALAW[0x2A] == -32256 and ALAW[0xAA] == 32256
 
 

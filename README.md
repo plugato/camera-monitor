@@ -261,6 +261,15 @@ A interface possui quatro direcoes:
 - esquerda e direita: pan
 - cima e baixo: tilt
 
+Um clique anda um passo; segurando a seta a camera continua andando (~1 passo a
+cada 0,75 s).
+
+**Posicoes salvas:** `＋ posicao` grava a posicao atual com um nome; o botao 📍
+volta a ela e o `×` apaga. A camera nao informa a propria posicao, entao o
+painel conta os passos e, ao chegar, corrige o resto comparando o video com uma
+miniatura gravada junto (fica em `fotos/.presets/`). Se a cena mudar muito (noite
+x dia), a correcao pela imagem e pulada e vale so a contagem.
+
 O endpoint usado pela interface e:
 
 ```text
@@ -286,6 +295,8 @@ A camera precisa aceitar o endpoint ONVIF configurado em `ptz.py`. O firmware po
 | `/healthz` | Healthcheck interno |
 | `/test` | Notificacao de teste (desktop e celular) |
 | `/ptz/<direcao>` | Movimento PTZ |
+| `/posicoes` | Lista as posicoes salvas |
+| `/posicoes/<nome>` | `PUT` salva a atual, `POST` vai ate ela, `DELETE` apaga |
 | `/fotos/<nome>` | Fotos dos alertas |
 
 Todos os endpoints, exceto `/healthz`, exigem autenticacao Basic.
@@ -338,8 +349,11 @@ No Raspberry Pi:
 - **Falar pela camera (audio bidirecional):** nao suportado. A camera (Yoosee)
   anuncia `AudioOutputs = 0` no ONVIF; o alto-falante so e acessivel pelo
   protocolo proprietario do app Yoosee.
-- **Pan irregular:** cada comando anda um passo de tamanho variavel e precisa de
-  ~3 s entre passos (detalhes em `ptz.py`).
+- **Pan irregular:** cada comando anda um passo de tamanho variavel, e a direita
+  anda mais que a esquerda (detalhes em `ptz.py`). Por isso as posicoes salvas
+  usam a imagem para acertar o fim do caminho.
+- **Sem presets na camera:** o firmware nao responde a `GetPresets`/`SetPreset`
+  nem `GetStatus` do ONVIF; as posicoes salvas sao do painel.
 
 ## Testes
 

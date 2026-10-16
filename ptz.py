@@ -10,16 +10,17 @@ A câmera é uma Yoosee/Gwell e o caminho de controle não é óbvio:
   - O firmware ignora a duração do movimento: cada ContinuousMove anda um passo
     só, e o passo é irregular -- medi 41 a 200px, com a direita andando mais que
     a esquerda. Não dá controle fino nem ida-e-volta simétrica.
-  - Tilt (y) não faz nada nesta câmera: ela só gira na horizontal.
-  - Comando que chega com o motor andando é ENGOLIDO (medido: dois comandos a
-    0,5s de intervalo movem o mesmo que um). Espere ~3s entre os passos --
-    é o que o `passos` daqui já faz, com pausa de 3s.
+  - Tilt (y): a nota antiga dizia que não move; a medição de 2026-10 foi
+    inconclusiva. O painel manda e, se não mover, nada quebra.
+  - Cada ContinuousMove anda um passo de ~0,3s; a chamada SOAP leva ~0,7s.
+    Comandos em sequência, um após a resposta do outro, andam um passo cada
+    (medido em 2026-10: 6 seguidos ~ 6 passos). O Stop não para nada e só
+    dobrava o tempo de cada passo: saiu.
   - RTSP também mente: OPTIONS anuncia USER_CMD_SET e SET_PARAMETER responde
     200 OK a qualquer ptzCmd, sem mover. Não use.
 """
 import socket
 import sys
-import time
 
 import config
 
@@ -57,18 +58,12 @@ def soap(corpo):
             resp += c
 
 
-def mover(direcao, passos=1, pausa=3.0):
+def mover(direcao, passos=1):
     x, y = VELOCIDADE[direcao]
-    for i in range(passos):
-        if i:
-            time.sleep(pausa)      # sem isso o passo seguinte é ignorado
+    for _ in range(passos):    # em sequência: o próximo sai após a resposta
         soap(f'<ptz:ContinuousMove><ptz:ProfileToken>{TOKEN}</ptz:ProfileToken>'
              f'<ptz:Velocity><tt:PanTilt x="{x}" y="{y}"/></ptz:Velocity>'
              f'</ptz:ContinuousMove>')
-        # o Stop não interrompe o passo (ele é fixo), mas evita deixar a
-        # câmera em movimento se um firmware futuro respeitar a duração
-        soap(f'<ptz:Stop><ptz:ProfileToken>{TOKEN}</ptz:ProfileToken>'
-             f'<ptz:PanTilt>true</ptz:PanTilt></ptz:Stop>')
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- PTZ mais rapido: sem o `Stop` e sem a espera de 3 s; segurar a seta anda sem parar.
+- Adicionadas posicoes salvas da camera (`/posicoes`), com ajuste final pela imagem.
 - Deteccao so roda quando a cena muda (`MOTION_MIN`), com analise forcada a cada 10 s.
 - FFmpeg entrega quadros crus (YUV4MPEG) em vez de MJPEG: ~3x menos CPU no Pi 3.
 - Adicionado deploy automatico no Raspberry Pi a cada push na `main` (job `deploy-pi`).
