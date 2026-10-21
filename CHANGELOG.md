@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Limiar de pessoa 0,65 -> 0,25 (`PESSOA_MIN`): atras da grade do portao a confianca fica em 0,25-0,45; no video do entregador, de 7% para 66% dos quadros detectados.
 - Pessoa notifica na 1a analise (animal continua em 3 seguidas): no Pi cada analise leva ~4,5 s e quem parava poucos segundos no portao nao gerava alerta. Pessoas detectadas e quase-detectadas (0,4 a 0,65) vao para o log.
 - PTZ mais rapido: sem o `Stop` e sem a espera de 3 s; segurar a seta anda sem parar.
 - Adicionadas posicoes salvas da camera (`/posicoes`), com ajuste final pela imagem.

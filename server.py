@@ -69,7 +69,11 @@ DETECT_NICE = int(os.environ.get("DETECT_NICE") or "10")
 # MOTION_IDLE_S para não perder quem ficou imóvel.
 MOTION_MIN = float(os.environ.get("MOTION_MIN") or "0.002")
 MOTION_IDLE_S = 10
-CONFIDENCE_MIN = 0.65
+# Pessoa atrás da grade do portão sai com 0,25-0,45 (barras cortam o corpo);
+# portão vazio não dá nada nem no piso do modelo, 0,25 (medido de dia no Pi,
+# 2026-10). Falso alarme à noite? Suba PESSOA_MIN. Animal fica alto: alucinação.
+CONFIDENCE_MIN = {"pessoa": float(os.environ.get("PESSOA_MIN") or "0.25"),
+                  "animal": 0.65}
 NOTIFY_COOLDOWN_S = 20         # antispam de toast, por categoria
 # nº de análises seguidas antes de notificar. No Pi 3 cada análise leva ~4,5s:
 # com 3 para pessoa, quem para alguns segundos no portão nunca notificava. O 3
@@ -196,10 +200,10 @@ def detect(frame):
     for i in range(out.shape[2]):
         conf = float(out[0, 0, i, 2])
         cls = VOC_CLASSES[int(out[0, 0, i, 1])]
-        if cls == "person" and 0.4 <= conf:   # no log: diz se o limiar perdeu alguém
-            print(f"pessoa {conf:.2f}{'' if conf >= CONFIDENCE_MIN else ' (abaixo do limiar)'}",
+        if cls == "person" and 0.2 <= conf:   # no log: para calibrar o limiar
+            print(f"pessoa {conf:.2f}{'' if conf >= CONFIDENCE_MIN['pessoa'] else ' (abaixo do limiar)'}",
                   flush=True)
-        if conf < CONFIDENCE_MIN or cls not in CATEGORY:
+        if cls not in CATEGORY or conf < CONFIDENCE_MIN[CATEGORY[cls]]:
             continue
         x1, y1, x2, y2 = out[0, 0, i, 3:7]
         if CATEGORY[cls] == "animal" and (x2 - x1) * (y2 - y1) > MAX_ANIMAL_AREA:
