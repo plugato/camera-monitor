@@ -311,8 +311,10 @@ def vlc_frames():
         last = [time.time()]
 
         def watchdog():  # o read() do pipe bloqueia se o backend travar
+            caiu = 0
             while proc.poll() is None:
-                if time.time() - last[0] > STALL_S:
+                caiu = caiu + 1 if conexao_caiu(proc.pid) else 0
+                if time.time() - last[0] > STALL_S or caiu >= 3:
                     kill_video(proc)
                     return
                 time.sleep(1)
@@ -337,6 +339,27 @@ def vlc_frames():
             kill_video(proc)
         state["connected"] = False
         time.sleep(2)
+
+
+def conexao_caiu(pid):
+    """O FFmpeg tem socket TCP e nenhum está ESTABLISHED? (Linux)
+
+    Atrasado, ele segue soltando vídeo velho por minutos depois que o MediaMTX
+    derruba a conexão: quadros chegam, então só o STALL_S não percebe."""
+    inodes = set()
+    try:
+        for fd in os.listdir(f"/proc/{pid}/fd"):
+            try:
+                alvo = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if alvo.startswith("socket:["):
+                inodes.add(alvo[8:-1])
+        with open("/proc/net/tcp") as f:  # o FFmpeg está no mesmo netns
+            estados = {c[3] for c in (l.split() for l in list(f)[1:]) if c[9] in inodes}
+    except OSError:
+        return False
+    return bool(estados) and "01" not in estados  # 01 = ESTABLISHED
 
 
 def mjpeg_frames(stream):
@@ -612,14 +635,16 @@ def audio():
 
 @app.route("/stream")
 def stream():
-    def gen():
+    def gen():  # só quadro novo: repetir o mesmo JPEG pesava no cloudflared do Pi
+        enviado = None
         while True:
             with lock:
                 jpg = state["jpeg"]
-            if jpg:
+            if jpg and jpg is not enviado:
+                enviado = jpg
                 yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
                        + jpg + b"\r\n")
-            time.sleep(0.08)
+            time.sleep(0.05)
     return Response(gen(),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
