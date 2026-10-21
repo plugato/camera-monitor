@@ -1,5 +1,6 @@
 # credenciais da câmera
 .env
+.env.*bak*
 mediamtx.yml
 mediamtx.exe
 

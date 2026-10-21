@@ -71,7 +71,10 @@ MOTION_MIN = float(os.environ.get("MOTION_MIN") or "0.002")
 MOTION_IDLE_S = 10
 CONFIDENCE_MIN = 0.65
 NOTIFY_COOLDOWN_S = 20         # antispam de toast, por categoria
-STREAK_MIN = 3                 # nº de análises consecutivas antes de notificar
+# nº de análises seguidas antes de notificar. No Pi 3 cada análise leva ~4,5s:
+# com 3 para pessoa, quem para alguns segundos no portão nunca notificava. O 3
+# fica para animal, que é onde o modelo alucina (carro/grade vira "pássaro").
+STREAK_MIN = {"pessoa": 1, "animal": 3}
 AUDIO_RATE = 16000             # SDP da câmera: a=rtpmap:8 PCMA/16000 (G.711 A-law)
 STATIC_AFTER_S = 45            # caixa parada por mais que isso = cenário (ex.: carro
                                # atrás do portão que o modelo chama de "pássaro")
@@ -193,6 +196,9 @@ def detect(frame):
     for i in range(out.shape[2]):
         conf = float(out[0, 0, i, 2])
         cls = VOC_CLASSES[int(out[0, 0, i, 1])]
+        if cls == "person" and 0.4 <= conf:   # no log: diz se o limiar perdeu alguém
+            print(f"pessoa {conf:.2f}{'' if conf >= CONFIDENCE_MIN else ' (abaixo do limiar)'}",
+                  flush=True)
         if conf < CONFIDENCE_MIN or cls not in CATEGORY:
             continue
         x1, y1, x2, y2 = out[0, 0, i, 3:7]
@@ -256,7 +262,7 @@ def maybe_notify(dets):
             streaks[cat] = 0
     for cat, labels in by_cat.items():
         streaks[cat] = streaks.get(cat, 0) + 1
-        if streaks[cat] < STREAK_MIN:
+        if streaks[cat] < STREAK_MIN[cat]:
             continue
         if now - state["last_notify"].get(cat, 0) < NOTIFY_COOLDOWN_S:
             continue
