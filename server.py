@@ -51,8 +51,9 @@ CAM_HOST = config.CAM_HOST
 HTTP_PORT = 8090
 APP_USER = os.environ.get("APP_USER", "")
 APP_PASS = os.environ.get("APP_PASS", "")
-# Atrás do Cloudflare Access: com os dois definidos, o login é só o do Access
-# (JWT do header Cf-Access-Jwt-Assertion) e APP_USER/APP_PASS deixam de valer.
+# Atrás do Cloudflare Access: com os dois definidos, o que chega pelo tunnel traz o
+# JWT do header Cf-Access-Jwt-Assertion e é validado por ele; sem o header (acesso
+# direto pela rede local) vale APP_USER/APP_PASS.
 CF_ACCESS_TEAM = os.environ.get("CF_ACCESS_TEAM", "")  # <team>.cloudflareaccess.com
 CF_ACCESS_AUD = os.environ.get("CF_ACCESS_AUD", "")    # Application Audience (AUD) tag
 NTFY_URL = os.environ.get("NTFY_URL", "")  # push no celular: https://ntfy.sh/<tópico-secreto>
@@ -133,7 +134,7 @@ def cf_access_ok():
 def require_login():
     if request.path == "/healthz":
         return None
-    if CF_ACCESS_TEAM and CF_ACCESS_AUD:
+    if CF_ACCESS_TEAM and CF_ACCESS_AUD and "Cf-Access-Jwt-Assertion" in request.headers:
         return None if cf_access_ok() else ("acesso pelo Cloudflare Access", 403)
     auth = request.authorization
     valid = (auth is not None

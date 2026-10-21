@@ -145,8 +145,9 @@ direto e nenhum PC precisa ficar ligado. Testado num Raspberry Pi 3 Model B
 
 - `Dockerfile.pi` usa o OpenCV e o numpy do Debian: o PyPI nao tem wheel para
   armv7 e compilar num Pi 3 leva horas.
-- `compose.pi.yaml` e standalone (nao e overlay) e publica o painel so em
-  `127.0.0.1:8091`; o acesso de fora e pelo `cloudflared` do proprio Pi.
+- `compose.pi.yaml` e standalone (nao e overlay) e publica o painel na porta
+  `8091`. Na rede local entra direto com `APP_USER`/`APP_PASS`; de fora, pelo
+  `cloudflared` do proprio Pi, com o login do Cloudflare Access.
 - O Pi 3 nao decodifica o H.265 1080p em tempo real (so decodificar ja fica em
   0,97x). Use o substream: `CAM_PATH=onvif2` (640x360). Ele nao tem audio, entao
   `CAM_AUDIO_PATH=onvif1`: o MediaMTX puxa o audio do stream principal so
