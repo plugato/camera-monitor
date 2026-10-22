@@ -84,7 +84,7 @@ Variaveis opcionais:
 | `PUBLIC_URL` | vazio | Endereco publico do painel; tocar na notificacao abre o ao vivo |
 | `DETECT_THREADS` | `0` (todas) | Threads do OpenCV na deteccao |
 | `DETECT_INTERVAL_S` | `0.4` | Pausa minima entre duas analises |
-| `MOTION_MIN` | `0.002` | Fracao da cena que precisa mudar para rodar o MobileNet; `0` analisa sempre |
+| `MOTION_BLOB` | `40` | Maior mancha de movimento (px, miniatura 160x90) para rodar o MobileNet; ignora chuva; `0` analisa sempre |
 | `WINDOWS_HOST` | vazio | So para WSL2, com `compose.wsl.yaml` |
 
 O arquivo `.env` e ignorado pelo Git. Nunca coloque credenciais diretamente em `compose.yaml`, no codigo ou em commits.
@@ -154,7 +154,7 @@ direto e nenhum PC precisa ficar ligado. Testado num Raspberry Pi 3 Model B
   enquanto alguem escuta.
 - Uma analise do MobileNet-SSD custa ~2,5 s no Pi 3. A deteccao roda em thread
   propria sobre o frame mais recente, entao o video nao trava, e so quando a
-  cena muda (`MOTION_MIN`; parada, analisa a cada 10 s mesmo assim).
+  cena muda (`MOTION_BLOB`; parada, analisa a cada 10 s mesmo assim).
 - O FFmpeg entrega quadros crus (YUV4MPEG) em vez de MJPEG: no Pi 3 isso caiu
   de 66% para 21% de um nucleo.
 - Sem dissipador o Pi 3 chega a ~83 C e o firmware reduz o clock

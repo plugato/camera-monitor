@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Filtro de movimento ignora chuva: exige mancha continua de `MOTION_BLOB` px (substitui `MOTION_MIN`). Na chuva o MobileNet rodava sem parar.
 - Watchdog reinicia o FFmpeg quando o MediaMTX derruba a conexao dele (antes o painel ficava minutos em video velho).
 - `/stream` so envia quadro novo: mandava 12,5 JPEG/s para 8 quadros/s, carga a mais no cloudflared do Pi.
 - Limiar de pessoa 0,65 -> 0,25 (`PESSOA_MIN`): atras da grade do portao a confianca fica em 0,25-0,45; no video do entregador, de 7% para 66% dos quadros detectados.

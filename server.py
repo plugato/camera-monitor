@@ -65,10 +65,13 @@ FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
 DETECT_INTERVAL_S = float(os.environ.get("DETECT_INTERVAL_S") or "0.4")
 DETECT_THREADS = int(os.environ.get("DETECT_THREADS") or "0")
 DETECT_NICE = int(os.environ.get("DETECT_NICE") or "10")
-# Só roda o MobileNet quando a cena muda: fração de pixels (miniatura 160x90)
-# que precisa mudar. 0 desliga o filtro. Parado, analisa mesmo assim a cada
-# MOTION_IDLE_S para não perder quem ficou imóvel.
-MOTION_MIN = float(os.environ.get("MOTION_MIN") or "0.002")
+# Só roda o MobileNet quando a cena muda: precisa de uma mancha contínua de
+# mudança com MOTION_BLOB px (miniatura 160x90). Contar pixels soltos não
+# servia: chuva muda 0,1-0,6% da cena em pingos de até 22 px e disparava
+# análise sem parar; pessoa (até atrás da grade) dá mancha mediana de 263 px.
+# 0 desliga o filtro. Parado, analisa mesmo assim a cada MOTION_IDLE_S para não
+# perder quem ficou imóvel.
+MOTION_BLOB = int(os.environ.get("MOTION_BLOB") or "40")
 MOTION_IDLE_S = 10
 # Pessoa atrás da grade do portão sai com 0,25-0,45 (barras cortam o corpo);
 # portão vazio não dá nada nem no piso do modelo, 0,25 (medido de dia no Pi,
@@ -418,10 +421,15 @@ def motion_thumb(frame):
 
 
 def moved(ref, thumb):
-    """A cena mudou desde a última análise? (ruído de compressão fica abaixo de 20)"""
-    if ref is None or MOTION_MIN <= 0:
+    """Algo do tamanho de gente mudou desde a última análise? Diferença acima de
+    20 (ruído de compressão fica abaixo), sem os pontos soltos (abertura 3x3,
+    tira chuva) e com a maior mancha >= MOTION_BLOB."""
+    if ref is None or MOTION_BLOB <= 0:
         return True
-    return np.count_nonzero(cv2.absdiff(ref, thumb) > 20) > MOTION_MIN * thumb.size
+    mudou = (cv2.absdiff(ref, thumb) > 20).astype(np.uint8)
+    mudou = cv2.morphologyEx(mudou, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mudou, connectivity=8)
+    return n > 1 and stats[1:, cv2.CC_STAT_AREA].max() >= MOTION_BLOB
 
 
 def detect_loop():
@@ -1068,6 +1076,10 @@ def _selfcheck():
     assert moved(None, motion_thumb(still))
     assert not moved(motion_thumb(still), motion_thumb(still))
     assert moved(motion_thumb(still), motion_thumb(walk))
+    chuva = still.copy()
+    for y, x in np.random.default_rng(2).integers(0, (356, 636), (300, 2)):
+        chuva[y:y + 4, x:x + 2] = 250                                # pingos espalhados
+    assert not moved(motion_thumb(still), motion_thumb(chuva))
     big = np.random.default_rng(1).random((400, 700)).astype(np.float32)
     big = cv2.GaussianBlur(big, (0, 0), 3)
     ref = big[50:230, 100:420]                                       # posição salva
