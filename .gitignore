@@ -22,3 +22,8 @@ teste/
 # certificado autoassinado que o MediaMTX gera ao rodar na raiz
 auto.crt
 auto.key
+
+# capturas de rede (trafego do celular)
+*.pcap
+*.pcapng
+*.apk

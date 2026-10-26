@@ -65,6 +65,9 @@ FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
 DETECT_INTERVAL_S = float(os.environ.get("DETECT_INTERVAL_S") or "0.4")
 DETECT_THREADS = int(os.environ.get("DETECT_THREADS") or "0")
 DETECT_NICE = int(os.environ.get("DETECT_NICE") or "10")
+# Quadros/s que o FFmpeg entrega. Cada um custa conversão, JPEG (se alguém
+# assiste) e envio; a detecção usa ~1 a cada 4,5 s no Pi 3 e não sente.
+VIDEO_FPS = int(os.environ.get("VIDEO_FPS") or "8")
 # Só roda o MobileNet quando a cena muda: precisa de uma mancha contínua de
 # mudança com MOTION_BLOB px (miniatura 160x90). Contar pixels soltos não
 # servia: chuva muda 0,1-0,6% da cena em pingos de até 22 px e disparava
@@ -113,6 +116,7 @@ state = {
     "detections": [],           # detecções do último frame analisado
     "events": deque(maxlen=50), # histórico de notificações
     "connected": False,
+    "espectadores": 0,          # conexões abertas em /stream
     "last_notify": {},          # categoria -> timestamp
 }
 lock = threading.Lock()
@@ -295,7 +299,7 @@ def vlc_frames():
         if VIDEO_BACKEND == "vlc" and (FLATPAK_VLC or VLC_EXE):
             vlc_command = FLATPAK_VLC or [VLC_EXE]
             command = vlc_command + ["-I", "dummy", "--no-audio", "--rtsp-tcp",
-                       RTSP_URL, ":sout=#transcode{vcodec=MJPG,acodec=none,fps=8}"
+                       RTSP_URL, f":sout=#transcode{{vcodec=MJPG,acodec=none,fps={VIDEO_FPS}}}"
                        ":standard{access=file,mux=mpjpeg,dst=-}"]
             use_vlc = True
         else:
@@ -304,7 +308,7 @@ def vlc_frames():
             src = MEDIAMTX_URL if VIDEO_BACKEND == "mediamtx" else RTSP_URL
             command = [FFMPEG_EXE, "-hide_banner", "-loglevel", "error",
                        "-rtsp_transport", "tcp", "-i", src, "-map", "0:v:0", "-an",
-                       "-vf", "fps=8", "-pix_fmt", "yuv420p",
+                       "-vf", f"fps={VIDEO_FPS}", "-pix_fmt", "yuv420p",
                        "-f", "yuv4mpegpipe", "pipe:1"]
             use_vlc = False
         # mjpeg lê em pedaços (bufsize=0); y4m lê quadros de tamanho exato
@@ -344,11 +348,16 @@ def vlc_frames():
         time.sleep(2)
 
 
-def conexao_caiu(pid):
-    """O FFmpeg tem socket TCP e nenhum está ESTABLISHED? (Linux)
+ATRASO_BYTES = 64 * 1024        # ~1 s de H265 do substream parado no socket
 
-    Atrasado, ele segue soltando vídeo velho por minutos depois que o MediaMTX
-    derruba a conexão: quadros chegam, então só o STALL_S não percebe."""
+
+def conexao_caiu(pid):
+    """O FFmpeg ficou para trás? (Linux) Atrasado, ele segue soltando vídeo velho
+    por minutos e quadros continuam chegando: só o STALL_S não percebe.
+
+    Visto no Pi: o MediaMTX desiste da conexão, mas com o buffer de recepção
+    cheio o FIN nem entra, e o lado do FFmpeg segue ESTABLISHED com 94 KB
+    parados. Então vale tanto socket fora de ESTABLISHED quanto fila cheia."""
     inodes = set()
     try:
         for fd in os.listdir(f"/proc/{pid}/fd"):
@@ -359,10 +368,12 @@ def conexao_caiu(pid):
             if alvo.startswith("socket:["):
                 inodes.add(alvo[8:-1])
         with open("/proc/net/tcp") as f:  # o FFmpeg está no mesmo netns
-            estados = {c[3] for c in (l.split() for l in list(f)[1:]) if c[9] in inodes}
+            socks = [(c[3], int(c[4].split(":")[1], 16))   # estado, rx_queue
+                     for c in (l.split() for l in list(f)[1:]) if c[9] in inodes]
     except OSError:
         return False
-    return bool(estados) and "01" not in estados  # 01 = ESTABLISHED
+    return bool(socks) and any(st != "01" or rx > ATRASO_BYTES  # 01 = ESTABLISHED
+                               for st, rx in socks)
 
 
 def mjpeg_frames(stream):
@@ -464,6 +475,10 @@ def capture_loop():
             dets, fired = detect_slot["dets"], detect_slot["fired"]
             detect_slot["fired"] = []
         detect_ready.set()
+        if not fired and not state["espectadores"]:
+            with lock:
+                state["detections"] = dets
+            continue  # ninguém vendo: sem desenho nem JPEG
         for d in dets:
             x1, y1, x2, y2 = d["box"]
             color = BOX_COLOR[d["category"]]
@@ -645,14 +660,20 @@ def audio():
 def stream():
     def gen():  # só quadro novo: repetir o mesmo JPEG pesava no cloudflared do Pi
         enviado = None
-        while True:
+        with lock:
+            state["espectadores"] += 1
+        try:
+            while True:
+                with lock:
+                    jpg = state["jpeg"]
+                if jpg and jpg is not enviado:
+                    enviado = jpg
+                    yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                           + jpg + b"\r\n")
+                time.sleep(0.05)
+        finally:  # cliente fechou: o servidor de WSGI fecha o gerador
             with lock:
-                jpg = state["jpeg"]
-            if jpg and jpg is not enviado:
-                enviado = jpg
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-                       + jpg + b"\r\n")
-            time.sleep(0.05)
+                state["espectadores"] -= 1
     return Response(gen(),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Watchdog tambem reinicia o FFmpeg com mais de 64 KB parados no socket: atrasado, o lado dele seguia ESTABLISHED e o painel travava.
+- `VIDEO_FPS` (4 no Pi): metade do custo de conversao, JPEG e envio.
+- Sem ninguem no `/stream`, a captura nao gera JPEG (so a foto do alerta).
 - Filtro de movimento ignora chuva: exige mancha continua de `MOTION_BLOB` px (substitui `MOTION_MIN`). Na chuva o MobileNet rodava sem parar.
 - Watchdog reinicia o FFmpeg quando o MediaMTX derruba a conexao dele (antes o painel ficava minutos em video velho).
 - `/stream` so envia quadro novo: mandava 12,5 JPEG/s para 8 quadros/s, carga a mais no cloudflared do Pi.
