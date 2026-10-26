@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Push no ntfy quando o video para por 1 min, quando volta, e quando o watchdog reinicia o FFmpeg 3+ vezes em 10 min.
+- Container do Pi em `America/Sao_Paulo`: hora das notificacoes e nome das fotos saiam em UTC (3 h a frente).
 - Watchdog tambem reinicia o FFmpeg com mais de 64 KB parados no socket: atrasado, o lado dele seguia ESTABLISHED e o painel travava.
 - `VIDEO_FPS` (4 no Pi): metade do custo de conversao, JPEG e envio.
 - Sem ninguem no `/stream`, a captura nao gera JPEG (so a foto do alerta).

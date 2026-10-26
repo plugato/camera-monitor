@@ -22,6 +22,7 @@ services:
       DETECT_THREADS: "1"
       DETECT_INTERVAL_S: "0"   # sem pausa: o nice 10 já protege o vídeo
       VIDEO_FPS: "4"           # metade do custo de conversão, JPEG e envio
+      TZ: America/Sao_Paulo    # hora das notificações, das fotos e dos pushes
     ports:
       - "8091:8090"   # rede local também: sem o JWT do Access vale APP_USER/APP_PASS
     volumes:

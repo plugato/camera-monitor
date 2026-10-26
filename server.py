@@ -322,6 +322,7 @@ def vlc_frames():
             while proc.poll() is None:
                 caiu = caiu + 1 if conexao_caiu(proc.pid) else 0
                 if time.time() - last[0] > STALL_S or caiu >= 3:
+                    saude["reinicios"].append(time.time())
                     kill_video(proc)
                     return
                 time.sleep(1)
@@ -468,8 +469,42 @@ def detect_loop():
         time.sleep(DETECT_INTERVAL_S)
 
 
+# ------------------------------------------------------------ saúde do vídeo
+# Push no celular quando o vídeo para (câmera fora da rede, FFmpeg travado) e
+# quando volta; e se o watchdog reinicia o FFmpeg demais (Pi sem CPU).
+SEM_VIDEO_S = 60
+saude = {"ultimo_quadro": time.time(), "sem_video": False,
+         "reinicios": deque(maxlen=20), "aviso_reinicio": 0.0}
+
+
+def checar_saude(agora):
+    """Pushes devidos agora: um por mudança de estado, não um por checagem."""
+    msgs = []
+    parado = agora - saude["ultimo_quadro"] > SEM_VIDEO_S
+    if parado != saude["sem_video"]:
+        saude["sem_video"] = parado
+        desde = time.strftime("%H:%M", time.localtime(saude["ultimo_quadro"]))
+        msgs.append(("Câmera sem imagem", f"Nenhum quadro novo desde {desde}.") if parado
+                    else ("Câmera voltou", "O vídeo voltou ao normal."))
+    recentes = sum(agora - t < 600 for t in saude["reinicios"])
+    if recentes >= 3 and agora - saude["aviso_reinicio"] > 3600:
+        saude["aviso_reinicio"] = agora
+        msgs.append(("Vídeo instável", f"O FFmpeg foi reiniciado {recentes} vezes em "
+                                       "10 min: o Pi pode estar sem CPU."))
+    return msgs
+
+
+def saude_loop():
+    while True:
+        time.sleep(10)
+        for titulo, msg in checar_saude(time.time()):
+            print(f"saúde: {titulo} - {msg}", flush=True)
+            phone_notify(titulo, msg)
+
+
 def capture_loop():
     for frame in vlc_frames():
+        saude["ultimo_quadro"] = time.time()
         with lock:
             detect_slot["frame"] = frame.copy()  # o desenho abaixo não vaza pro detector
             dets, fired = detect_slot["dets"], detect_slot["fired"]
@@ -1109,6 +1144,16 @@ def _selfcheck():
     ex, ey, _ = falta_andar(ref, big[60:240, 100:420])               # 10px abaixo
     assert abs(ey - 10) < 1 and rumo(ex, ey) == "cima"
     assert rumo(*falta_andar(ref, ref)[:2]) is None                  # já está lá
+    saude.update(ultimo_quadro=1000.0, sem_video=False, aviso_reinicio=0.0)
+    saude["reinicios"].clear()
+    assert checar_saude(1030) == []                                  # vídeo em dia
+    assert checar_saude(1061)[0][0] == "Câmera sem imagem"           # parou: avisa
+    assert checar_saude(1200) == []                                  # uma vez só
+    saude["ultimo_quadro"] = 1210.0
+    assert checar_saude(1211)[0][0] == "Câmera voltou"
+    saude["reinicios"].extend([5000, 5100, 5200])
+    assert checar_saude(5201)[-1][0] == "Vídeo instável"
+    assert checar_saude(5300) == []                                  # no máx. 1/hora
     assert ALAW[0x55] == -8 and ALAW[0xD5] == 8 and ALAW[0x2A] == -32256 and ALAW[0xAA] == 32256
 
 
@@ -1117,6 +1162,7 @@ def start_capture_worker():
     if not any(thread.name == "camera-capture" for thread in threading.enumerate()):
         threading.Thread(target=capture_loop, name="camera-capture", daemon=True).start()
         threading.Thread(target=detect_loop, name="camera-detect", daemon=True).start()
+        threading.Thread(target=saude_loop, name="camera-saude", daemon=True).start()
 
 
 if __name__ == "__main__":
