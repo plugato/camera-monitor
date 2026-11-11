@@ -93,9 +93,6 @@ MAX_ANIMAL_AREA = 0.06         # animal ocupando mais que isso do frame é aluci
                                # o modelo chama carro/grade de "pássaro" com 80%.
                                # Calibrado p/ esta câmera (falsos medidos: 9%-65%);
                                # se um bicho real colado no portão for ignorado, suba.
-MAX_PET_AREA = 0.25            # gato/cachorro chegam perto da câmera e passam de 6%;
-                               # 25% ainda barra a grade inteira vista como "gato".
-MAX_AREA = {"cat": MAX_PET_AREA, "dog": MAX_PET_AREA}  # resto dos animais: MAX_ANIMAL_AREA
 
 VOC_CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle",
                "bus", "car", "cat", "chair", "cow", "diningtable", "dog",
@@ -201,14 +198,6 @@ def desktop_notify(title: str, msg: str) -> None:
         pass
 
 
-def too_big(cls, box):
-    """Caixa (x1, y1, x2, y2 normalizados) grande demais p/ ser esse animal."""
-    if CATEGORY[cls] != "animal":
-        return False
-    x1, y1, x2, y2 = box
-    return (x2 - x1) * (y2 - y1) > MAX_AREA.get(cls, MAX_ANIMAL_AREA)
-
-
 def detect(frame):
     h, w = frame.shape[:2]
     blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)),
@@ -224,7 +213,8 @@ def detect(frame):
                   flush=True)
         if cls not in CATEGORY or conf < CONFIDENCE_MIN[CATEGORY[cls]]:
             continue
-        if too_big(cls, out[0, 0, i, 3:7]):
+        x1, y1, x2, y2 = out[0, 0, i, 3:7]
+        if CATEGORY[cls] == "animal" and (x2 - x1) * (y2 - y1) > MAX_ANIMAL_AREA:
             continue
         box = out[0, 0, i, 3:7] * np.array([w, h, w, h])
         found.append({"label": LABELS_PT[cls], "category": CATEGORY[cls],
@@ -1164,10 +1154,6 @@ def _selfcheck():
     saude["reinicios"].extend([5000, 5100, 5200])
     assert checar_saude(5201)[-1][0] == "Vídeo instável"
     assert checar_saude(5300) == []                                  # no máx. 1/hora
-    close = (0.3, 0.3, 0.7, 0.6)                                     # 12% do frame
-    assert too_big("bird", close) and not too_big("cat", close)      # pássaro grande: falso
-    assert not too_big("dog", close) and not too_big("person", close)
-    assert too_big("cat", (0, 0, 0.8, 0.5))                          # 40%: grade, não gato
     assert ALAW[0x55] == -8 and ALAW[0xD5] == 8 and ALAW[0x2A] == -32256 and ALAW[0xAA] == 32256
 
 
