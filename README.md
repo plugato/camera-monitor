@@ -82,6 +82,10 @@ Variaveis opcionais:
 | `CAM_AUDIO_PATH` | vazio | Caminho da camera de onde puxar o audio, quando `CAM_PATH` nao tem audio (ex.: `onvif2` + `onvif1`) |
 | `NTFY_URL` | vazio | Topico ntfy para push no celular. Vazio desliga o push |
 | `PUBLIC_URL` | vazio | Endereco publico do painel; tocar na notificacao abre o ao vivo |
+| `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY`, `R2_SECRET_KEY` | vazio | Copia das fotos e do historico num bucket R2. Vazio = so no disco |
+| `CLIPE_ANTES_S` | `5` | Segundos de video antes do alerta no clipe (a deteccao no Pi chega 3-5 s atrasada) |
+| `CLIPE_MAX_S` | `30` | Duracao maxima do clipe depois do alerta; `0` desliga os clipes |
+| `FOTOS_LOCAL_DIAS` | `7` | Com R2: foto mais velha que isso sai do disco depois de confirmada no bucket |
 | `DETECT_THREADS` | `0` (todas) | Threads do OpenCV na deteccao |
 | `DETECT_INTERVAL_S` | `0.4` | Pausa minima entre duas analises |
 | `VIDEO_FPS` | `8` | Quadros/s entregues pelo FFmpeg (4 no Pi); menos = menos CPU no video, sem afetar a deteccao |
@@ -255,6 +259,64 @@ propria: internet lenta nao segura o video.
 
 Quem souber o nome do topico recebe as fotos: trate-o como senha. O push leva
 uma foto, nao video; o ao vivo e o link.
+
+## Clipes dos alertas
+
+Junto da foto, cada alerta grava um clipe MP4 (H.264, 640x360, toca em qualquer
+celular ou navegador) em `fotos/`, com o mesmo nome da foto:
+
+- comeca `CLIPE_ANTES_S` antes do alerta: o video fica num buffer em memoria
+  (~14 MB no Pi), entao o clipe mostra a pessoa chegando;
+- continua enquanto houver movimento na cena e fecha 3 s depois que tudo para,
+  ou em `CLIPE_MAX_S`; alerta novo durante a gravacao estica o mesmo clipe;
+- usa os quadros que o monitor ja decodifica (4 por segundo no Pi): nao abre
+  outra conexao com a camera. O FFmpeg codifica em `nice 10` numa thread propria;
+  se faltar CPU, o clipe perde quadro e o video ao vivo segue;
+- pronto o clipe, aparece um link "video" no historico do painel, ele sobe para
+  o R2 (se ligado) e vai um segundo push no ntfy, de prioridade baixa (sem som),
+  com o video anexado.
+
+## Fotos no Cloudflare R2
+
+Sem R2 as fotos e os clipes dos alertas ficam so em `fotos/` e se acumulam no cartao SD. Com
+as quatro variaveis `R2_*` definidas:
+
+- cada foto e cada clipe sobe para `fotos/<nome>` no bucket logo depois do alerta (em
+  thread propria, com novas tentativas);
+- o historico de alertas fica em `fotos/.eventos.json` e no objeto `eventos.json`
+  do bucket: sobrevive a restart e, se o cartao for trocado, volta do R2;
+- a cada 6 h, foto com mais de `FOTOS_LOCAL_DIAS` sai do disco, mas so depois de
+  confirmada no bucket (a que falhou ao subir e enviada nessa hora);
+- o painel continua abrindo a foto antiga: `/fotos/<nome>` redireciona para um
+  link assinado do R2 valido por 1 h.
+
+Configuracao, uma vez:
+
+1. Crie o bucket e a regra que apaga as fotos com 30 dias (o `eventos.json` fica
+   fora do prefixo e nao expira):
+
+   ```bash
+   npx wrangler r2 bucket create camera-monitor-fotos
+   npx wrangler r2 bucket lifecycle add camera-monitor-fotos fotos-30-dias fotos/ --expire-days 30
+   ```
+
+2. **R2 > Manage API tokens > Create API token**: permissao **Object Read & Write**,
+   aplicada so ao bucket `camera-monitor-fotos`. Anote o Access Key ID, o Secret
+   Access Key e o endpoint S3 (`https://<conta>.r2.cloudflarestorage.com`).
+3. `R2_ENDPOINT` e `R2_BUCKET` ficam no `compose.pi.yaml`. As chaves vao em dois
+   secrets do GitHub, que o deploy acrescenta ao `.env` do `PI_ENV_FILE` (assim
+   nao e preciso reescrever esse secret):
+
+   ```bash
+   gh secret set R2_ACCESS_KEY
+   gh secret set R2_SECRET_KEY
+   ```
+
+   Fora do Pi, as quatro variaveis `R2_*` vao no `.env`.
+
+O bucket e privado: nada fica publico, so os links assinados que o painel gera
+para quem ja entrou nele. Custo: ~30 KB por foto e algumas centenas de KB por clipe,
+bem dentro dos 10 GB gratis.
 
 ## Controle PTZ
 

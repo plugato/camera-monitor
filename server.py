@@ -18,6 +18,8 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from email.header import Header
@@ -28,7 +30,7 @@ import numpy as np
 
 import config
 import ptz
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 
 # ---------------------------------------------------------------- config
 # O backend pode ser escolhido com VIDEO_BACKEND=auto|ffmpeg|vlc.
@@ -59,6 +61,24 @@ CF_ACCESS_AUD = os.environ.get("CF_ACCESS_AUD", "")    # Application Audience (A
 NTFY_URL = os.environ.get("NTFY_URL", "")  # push no celular: https://ntfy.sh/<tópico-secreto>
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")  # tocar no push abre o ao vivo
 FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
+EVENTOS_JSON = os.path.join(FOTOS_DIR, ".eventos.json")  # histórico sobrevive ao restart
+# Cópia das fotos e do histórico num bucket R2 (API S3). Com o R2 ligado, a foto
+# com mais de FOTOS_LOCAL_DIAS sai do cartão SD depois de confirmada no bucket,
+# que apaga sozinho com 30 dias (regra de ciclo de vida no bucket). Vazio = só local.
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "").rstrip("/")  # https://<conta>.r2.cloudflarestorage.com
+R2_BUCKET = os.environ.get("R2_BUCKET", "")
+R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY", "")
+R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY", "")
+R2_ON = all((R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY, R2_SECRET_KEY))
+FOTOS_LOCAL_DIAS = float(os.environ.get("FOTOS_LOCAL_DIAS") or "7")
+FOTO_NOME = re.compile(r"\d{8}_\d{6}_\w+\.(?:jpg|mp4)")  # foto ou clipe do alerta
+# Clipe MP4 junto da foto: começa CLIPE_ANTES_S antes do alerta (no Pi a detecção
+# chega uns 3-5 s depois do quadro) e segue enquanto houver movimento, até
+# CLIPE_MAX_S. CLIPE_MAX_S=0 desliga.
+CLIPE_ANTES_S = float(os.environ.get("CLIPE_ANTES_S") or "5")
+CLIPE_MAX_S = float(os.environ.get("CLIPE_MAX_S") or "30")
+CLIPE_PARADO_S = 3             # sem movimento por isso = fim do clipe
+CLIPE_LARGURA = 640            # 1080p no PC vira 640x360: arquivo pequeno pro celular
 # A detecção roda em thread própria sobre o frame mais recente, então o vídeo não
 # trava enquanto ela pensa (num Pi 3 uma análise custa ~2,5s). Estes dois são o
 # botão de CPU: pausa entre análises e threads do OpenCV (0 = todas).
@@ -157,16 +177,16 @@ def healthz():
     return "ok"
 
 
-def phone_notify(title, msg, jpg=None):
-    """Push via ntfy (app no celular), com a foto anexada. Em thread: rede lenta
-    não pode segurar o loop de captura."""
+def phone_notify(title, msg, jpg=None, nome="foto.jpg", prioridade="high"):
+    """Push via ntfy (app no celular), com a foto (ou o clipe) anexada. Em thread:
+    rede lenta não pode segurar o loop de captura."""
     if not NTFY_URL:
         return
     headers = {"Title": Header(title, "utf-8").encode(),
                "Message": Header(msg, "utf-8").encode(),
-               "Priority": "high", "Tags": "rotating_light"}
+               "Priority": prioridade, "Tags": "rotating_light"}
     if jpg:
-        headers["Filename"] = "foto.jpg"
+        headers["Filename"] = nome
     if PUBLIC_URL:
         headers["Click"] = PUBLIC_URL
         headers["Actions"] = f"view, Ao vivo, {PUBLIC_URL}"
@@ -178,6 +198,148 @@ def phone_notify(title, msg, jpg=None):
         except OSError as e:
             print(f"ntfy falhou: {e}", flush=True)
     threading.Thread(target=send, daemon=True).start()
+
+
+# ------------------------------------------------------------ R2 (fotos e histórico)
+# Assinatura AWS SigV4 feita à mão: no Pi não tem boto3 (pacotes do Debian) e
+# PUT/HEAD/GET de um objeto é tudo de que precisamos.
+def _q(s):
+    return urllib.parse.quote(s, safe="-_.~")
+
+
+def r2_assinar(method, key, headers=None, payload_hash="UNSIGNED-PAYLOAD",
+               expira_s=0, agora=None):
+    """Devolve (url, headers) assinados. expira_s > 0: URL pré-assinada (query)."""
+    amz = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(agora))
+    escopo = f"{amz[:8]}/auto/s3/aws4_request"
+    uri = "/" + urllib.parse.quote(f"{R2_BUCKET}/{key}", safe="/-_.~")
+    hdr = {k.lower(): v for k, v in (headers or {}).items()}
+    hdr["host"] = urlsplit(R2_ENDPOINT).netloc
+    query = {}
+    if expira_s:
+        query = {"X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+                 "X-Amz-Credential": f"{R2_ACCESS_KEY}/{escopo}", "X-Amz-Date": amz,
+                 "X-Amz-Expires": str(expira_s), "X-Amz-SignedHeaders": "host"}
+        hdr = {"host": hdr["host"]}
+    else:
+        hdr |= {"x-amz-date": amz, "x-amz-content-sha256": payload_hash}
+    qs = "&".join(f"{_q(k)}={_q(v)}" for k, v in sorted(query.items()))
+    assinados = ";".join(sorted(hdr))
+    canonico = "\n".join([method, uri, qs,
+                          "".join(f"{k}:{hdr[k].strip()}\n" for k in sorted(hdr)),
+                          assinados, payload_hash])
+    texto = "\n".join(["AWS4-HMAC-SHA256", amz, escopo,
+                       hashlib.sha256(canonico.encode()).hexdigest()])
+    chave = ("AWS4" + R2_SECRET_KEY).encode()
+    for parte in (amz[:8], "auto", "s3", "aws4_request"):
+        chave = hmac.new(chave, parte.encode(), hashlib.sha256).digest()
+    assinatura = hmac.new(chave, texto.encode(), hashlib.sha256).hexdigest()
+    del hdr["host"]  # o urllib põe o mesmo
+    if expira_s:
+        return f"{R2_ENDPOINT}{uri}?{qs}&X-Amz-Signature={assinatura}", hdr
+    hdr["authorization"] = (f"AWS4-HMAC-SHA256 Credential={R2_ACCESS_KEY}/{escopo}, "
+                            f"SignedHeaders={assinados}, Signature={assinatura}")
+    return f"{R2_ENDPOINT}{uri}", hdr
+
+
+def r2_pedir(method, key, corpo=None, tipo=None):
+    """Status HTTP da operação; falha de rede sobe como OSError."""
+    url, hdr = r2_assinar(method, key, {"content-type": tipo} if tipo else None,
+                          hashlib.sha256(corpo or b"").hexdigest())
+    try:
+        with urllib.request.urlopen(urllib.request.Request(
+                url, data=corpo, method=method, headers=hdr), timeout=30) as r:
+            r.read()
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+r2_fila = queue.Queue()
+
+
+def r2_enviar(key, corpo, tipo):
+    if R2_ON:
+        r2_fila.put((key, corpo, tipo))
+
+
+def r2_loop():
+    """Envia em série, fora do loop de captura. Foto que não subir fica no SD e
+    a limpeza tenta de novo depois; o histórico sobe de novo no próximo evento."""
+    while True:
+        key, corpo, tipo = r2_fila.get()
+        for espera in (5, 30, 120, None):
+            try:
+                status = r2_pedir("PUT", key, corpo, tipo)
+            except OSError as e:
+                status = e
+            if status == 200:
+                break
+            print(f"R2: falha ao enviar {key}: {status}", flush=True)
+            if espera:
+                time.sleep(espera)
+
+
+def tipo_midia(nome):
+    return "video/mp4" if nome.endswith(".mp4") else "image/jpeg"
+
+
+def limpar_fotos_locais(agora=None):
+    """Tira do SD as fotos com mais de FOTOS_LOCAL_DIAS, só se estão no R2."""
+    limite = (agora or time.time()) - FOTOS_LOCAL_DIAS * 86400
+    for nome in sorted(os.listdir(FOTOS_DIR)):
+        caminho = os.path.join(FOTOS_DIR, nome)
+        if not FOTO_NOME.fullmatch(nome) or os.path.getmtime(caminho) > limite:
+            continue
+        try:
+            status = r2_pedir("HEAD", f"fotos/{nome}")
+            if status == 404:
+                with open(caminho, "rb") as f:
+                    status = r2_pedir("PUT", f"fotos/{nome}", f.read(), tipo_midia(nome))
+        except OSError as e:
+            print(f"R2: limpeza parou, sem rede: {e}", flush=True)
+            return
+        if status == 200:
+            os.remove(caminho)
+        else:
+            print(f"R2: {nome} ficou no SD ({status})", flush=True)
+
+
+def limpeza_loop():
+    while True:
+        limpar_fotos_locais()
+        time.sleep(6 * 3600)
+
+
+def salvar_eventos():
+    with lock:
+        corpo = json.dumps(list(state["events"]), ensure_ascii=False).encode()
+    tmp = EVENTOS_JSON + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(corpo)
+    os.replace(tmp, EVENTOS_JSON)
+    r2_enviar("eventos.json", corpo, "application/json")
+
+
+def carregar_eventos():
+    """Histórico do SD; se o cartão foi trocado, do R2."""
+    try:
+        with open(EVENTOS_JSON, "rb") as f:
+            corpo = f.read()
+    except OSError:
+        if not R2_ON:
+            return
+        try:
+            with urllib.request.urlopen(r2_assinar("GET", "eventos.json", expira_s=60)[0],
+                                        timeout=15) as r:
+                corpo = r.read()
+        except OSError as e:
+            print(f"R2: sem histórico ({e})", flush=True)
+            return
+    try:
+        state["events"].extend(json.loads(corpo))
+    except ValueError:
+        pass
 
 
 def desktop_notify(title: str, msg: str) -> None:
@@ -502,14 +664,127 @@ def saude_loop():
             phone_notify(titulo, msg)
 
 
+# ------------------------------------------------------------ clipes do alerta
+NICE = ["nice", "-n", "10"] if shutil.which("nice") else []
+
+
+def reduzir(frame):
+    h, w = frame.shape[:2]
+    if w <= CLIPE_LARGURA:
+        return frame
+    return cv2.resize(frame, (CLIPE_LARGURA, round(h * CLIPE_LARGURA / w / 2) * 2),
+                      interpolation=cv2.INTER_AREA)
+
+
+class Clipe:
+    """Um MP4 sendo gravado. O FFmpeg (H.264, nice 10) codifica numa thread
+    própria e o loop de captura só enfileira: se o Pi não der conta, o clipe perde
+    quadro, o vídeo ao vivo não trava."""
+
+    def __init__(self, nome, quadros, fps):
+        self.nome, self.fps, self.eventos = nome, fps, []
+        self.inicio = self.ultimo_mov = time.time()
+        self.thumb = motion_thumb(quadros[-1])
+        self.forma = quadros[-1].shape
+        self.fim = threading.Event()
+        self.fila = queue.Queue(maxsize=len(quadros) + 4 * fps)
+        for q in quadros:
+            if q.shape == self.forma:
+                self.fila.put_nowait(q)
+        h, w = self.forma[:2]
+        self.tmp = os.path.join(FOTOS_DIR, f".{nome}.tmp")
+        self.proc = subprocess.Popen(
+            NICE + [FFMPEG_EXE, "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}",
+                    "-framerate", str(fps), "-i", "pipe:0",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                    "-pix_fmt", "yuv420p", "-threads", "1", "-movflags", "+faststart",
+                    "-f", "mp4", self.tmp],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        threading.Thread(target=self._codificar, name="camera-clipe", daemon=True).start()
+
+    def adicionar(self, quadro, agora=None):
+        """Enfileira o quadro; False quando o clipe acabou."""
+        agora = time.time() if agora is None else agora
+        if quadro.shape == self.forma:
+            thumb = motion_thumb(quadro)
+            if moved(self.thumb, thumb):
+                self.ultimo_mov = agora
+            self.thumb = thumb
+            try:
+                self.fila.put_nowait(quadro)
+            except queue.Full:
+                pass
+        if agora - self.ultimo_mov > CLIPE_PARADO_S or agora - self.inicio > CLIPE_MAX_S:
+            self.fim.set()
+            return False
+        return True
+
+    def _codificar(self):
+        quadros = 0
+        while True:
+            try:
+                q = self.fila.get(timeout=0.5)
+            except queue.Empty:
+                if self.fim.is_set():
+                    break
+                continue
+            try:
+                self.proc.stdin.write(q.tobytes())
+                quadros += 1
+            except OSError:
+                break
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        erro = self.proc.stderr.read().decode(errors="replace").strip()
+        if self.proc.wait() != 0 or not quadros:
+            print(f"clipe {self.nome} falhou: {erro}", flush=True)
+            if os.path.exists(self.tmp):
+                os.remove(self.tmp)
+            return
+        final = os.path.join(FOTOS_DIR, self.nome)
+        os.replace(self.tmp, final)
+        print(f"clipe {self.nome}: {quadros / self.fps:.0f} s", flush=True)
+        with lock:
+            for ev in self.eventos:
+                ev["video"] = self.nome
+            titulo = self.eventos[0]["title"] if self.eventos else "Alerta"
+        salvar_eventos()
+        with open(final, "rb") as f:
+            dados = f.read()
+        r2_enviar(f"fotos/{self.nome}", dados, "video/mp4")
+        phone_notify(f"Vídeo: {titulo}", f"{quadros / self.fps:.0f} s de gravação.",
+                     dados, "video.mp4", "low")
+
+
+def abrir_clipe(nome, antes):
+    try:
+        return Clipe(nome, list(antes), VIDEO_FPS)
+    except OSError as e:  # sem FFmpeg (Windows sem PATH): fica só a foto
+        print(f"clipe não gravado: {e}", flush=True)
+        return None
+
+
 def capture_loop():
+    antes = deque(maxlen=max(1, round(CLIPE_ANTES_S * VIDEO_FPS)))
+    clipe = None
     for frame in vlc_frames():
         saude["ultimo_quadro"] = time.time()
+        limpo = frame.copy()  # o desenho abaixo não vaza pro detector nem pro clipe
         with lock:
-            detect_slot["frame"] = frame.copy()  # o desenho abaixo não vaza pro detector
+            detect_slot["frame"] = limpo
             dets, fired = detect_slot["dets"], detect_slot["fired"]
             detect_slot["fired"] = []
         detect_ready.set()
+        if CLIPE_MAX_S > 0:
+            quadro = reduzir(limpo)
+            if clipe and not clipe.adicionar(quadro):
+                clipe = None
+                antes.clear()
+            if not clipe:
+                antes.append(quadro)
         if not fired and not state["espectadores"]:
             with lock:
                 state["detections"] = dets
@@ -528,11 +803,21 @@ def capture_loop():
                 with open(os.path.join(FOTOS_DIR, ev["photo"]), "wb") as f:
                     f.write(jpg.tobytes())
                 phone_notify(ev["title"], ev["msg"], jpg.tobytes())
+                r2_enviar(f"fotos/{ev['photo']}", jpg.tobytes(), "image/jpeg")
+            if fired and CLIPE_MAX_S > 0:
+                if clipe is None and antes:
+                    clipe = abrir_clipe(fired[0]["photo"][:-4] + ".mp4", antes)
+                    antes.clear()
+                if clipe:  # alerta novo no meio do clipe: estica e entra nele
+                    clipe.ultimo_mov = time.time()
+                    clipe.eventos += fired
             with lock:
                 state["jpeg"] = jpg.tobytes()
                 state["detections"] = dets
                 for ev in fired:
                     state["events"].appendleft(ev)
+            if fired:
+                salvar_eventos()
             fired = []
 
 
@@ -715,6 +1000,8 @@ def stream():
 
 @app.route("/fotos/<path:name>")
 def foto(name):
+    if R2_ON and FOTO_NOME.fullmatch(name) and not os.path.exists(os.path.join(FOTOS_DIR, name)):
+        return redirect(r2_assinar("GET", f"fotos/{name}", expira_s=3600)[0])  # já saiu do SD
     return send_from_directory(FOTOS_DIR, name)
 
 
@@ -729,13 +1016,14 @@ def status():
 @app.route("/test")
 def test():
     """Simula uma notificação (testa bipe/PiP/toast sem a câmera)."""
-    fotos = sorted(os.listdir(FOTOS_DIR))
+    fotos = sorted(n for n in os.listdir(FOTOS_DIR) if FOTO_NOME.fullmatch(n) and n.endswith(".jpg"))
     ev = {"time": time.strftime("%H:%M:%S"), "title": "Teste!",
           "msg": "Notificação simulada.", "photo": fotos[-1] if fotos else None}
     desktop_notify("Teste", ev["msg"])
     phone_notify("Teste", ev["msg"])
     with lock:
         state["events"].appendleft(ev)
+    salvar_eventos()
     return "ok, notificação simulada"
 
 
@@ -899,6 +1187,7 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
   li time{color:#9ca3af;margin-right:8px}
   .empty{color:#6b7280}
   .thumb{display:block;width:100%;border-radius:6px;margin-top:6px}
+  .video{display:inline-block;margin-top:4px;color:inherit;font-size:.9em}
   #painel{background:#1f2937;border-radius:8px;padding:6px}
   .barra{display:flex;gap:6px;align-items:center;margin-bottom:6px}
   .barra button{background:#374151;color:#e5e7eb;border:0;border-radius:6px;
@@ -987,7 +1276,7 @@ async function tick(){
     if(lastEv !== null && newest && newest !== lastEv){ beep(); pipAlert(); audioNoAlerta(); }
     lastEv = newest || '';
     elLog.innerHTML = s.events.length
-      ? s.events.map(e=>`<li><time>${e.time}</time>${e.title} — ${e.msg}${e.photo?`<a href="/fotos/${e.photo}" target="_blank"><img class="thumb" src="/fotos/${e.photo}" loading="lazy"></a>`:''}</li>`).join('')
+      ? s.events.map(e=>`<li><time>${e.time}</time>${e.title} — ${e.msg}${e.photo?`<a href="/fotos/${e.photo}" target="_blank"><img class="thumb" src="/fotos/${e.photo}" loading="lazy"></a>`:''}${e.video?`<a class="video" href="/fotos/${e.video}" target="_blank">▶ vídeo</a>`:''}</li>`).join('')
       : '<li class="empty">nenhuma ainda</li>';
   }catch(e){}
 }
@@ -1155,11 +1444,25 @@ def _selfcheck():
     assert checar_saude(5201)[-1][0] == "Vídeo instável"
     assert checar_saude(5300) == []                                  # no máx. 1/hora
     assert ALAW[0x55] == -8 and ALAW[0xD5] == 8 and ALAW[0x2A] == -32256 and ALAW[0xAA] == 32256
+    global R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY, R2_SECRET_KEY
+    r2_real = R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY, R2_SECRET_KEY
+    R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY, R2_SECRET_KEY = (
+        "https://conta.r2.cloudflarestorage.com", "b", "AKID", "segredo")
+    url = r2_assinar("GET", "fotos/a.jpg", expira_s=60, agora=0)[0]  # conferido com o botocore
+    assert url.endswith("Signature=69b92c9d171459824f94e853b623d8961b61aa63ebd1787a00849da7e48dae4e")
+    R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY, R2_SECRET_KEY = r2_real
+    assert all(FOTO_NOME.fullmatch(n) for n in ("20261113_120000_pessoa.jpg", "20261113_120000_animal.jpg"))
+    assert not any(FOTO_NOME.fullmatch(n) for n in (".eventos.json", ".presets", "../x.jpg"))
 
 
 def start_capture_worker():
     """Inicia a captura uma vez, tanto no Gunicorn quanto no modo local."""
     if not any(thread.name == "camera-capture" for thread in threading.enumerate()):
+        os.makedirs(FOTOS_DIR, exist_ok=True)
+        carregar_eventos()
+        if R2_ON:
+            threading.Thread(target=r2_loop, name="camera-r2", daemon=True).start()
+            threading.Thread(target=limpeza_loop, name="camera-limpeza", daemon=True).start()
         threading.Thread(target=capture_loop, name="camera-capture", daemon=True).start()
         threading.Thread(target=detect_loop, name="camera-detect", daemon=True).start()
         threading.Thread(target=saude_loop, name="camera-saude", daemon=True).start()
