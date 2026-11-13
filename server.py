@@ -1099,16 +1099,28 @@ def status():
 
 @app.route("/test")
 def test():
-    """Simula uma notificação (testa bipe/PiP/toast sem a câmera)."""
+    """Simula um alerta com a última foto (bipe/PiP/toast, IA e push no celular).
+    Espera a IA e diz o que ela respondeu: o teste ponta a ponta sem a câmera."""
     fotos = sorted(n for n in os.listdir(FOTOS_DIR) if FOTO_NOME.fullmatch(n) and n.endswith(".jpg"))
     ev = {"time": time.strftime("%H:%M:%S"), "title": "Teste!",
           "msg": "Notificação simulada.", "photo": fotos[-1] if fotos else None}
     desktop_notify("Teste", ev["msg"])
-    phone_notify("Teste", ev["msg"])
     with lock:
         state["events"].appendleft(ev)
+    if not (IA_ON and ev["photo"]):
+        phone_notify("Teste", ev["msg"])
+        salvar_eventos()
+        return "ok, notificação simulada (sem IA: push direto)"
+    with open(os.path.join(FOTOS_DIR, ev["photo"]), "rb") as f:
+        jpg = f.read()
+    avisar_alerta(ev, "animal" if ev["photo"].endswith("_animal.jpg") else "pessoa", jpg)
     salvar_eventos()
-    return "ok, notificação simulada"
+    fim = time.time() + IA_TIMEOUT_S + 5
+    while ev.get("ia") == "pendente" and time.time() < fim:
+        time.sleep(0.3)
+    push = "sem push: a IA disse que é falso alarme" if ev.get("ia") == "descartado" else "push enviado"
+    return (f"ok, teste com a foto {ev['photo']}\nIA: {ev.get('ia')} - {ev.get('ia_desc', '')}\n{push}",
+            200, {"Content-Type": "text/plain; charset=utf-8"})
 
 
 # ------------------------------------------------------------ PTZ e posições
