@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Alerta confirmado no Workers AI (Gemma 4) antes do push: falso alarme fica so no historico, marcado; erro, demora ou `IA_LIMITE_DIA` mandam o push como antes.
 - Clipe MP4 de cada alerta: 5 s antes (`CLIPE_ANTES_S`), segue enquanto houver movimento ate 30 s (`CLIPE_MAX_S`); link no historico, push de prioridade baixa com o video e copia no R2.
 - Fotos dos alertas e historico num bucket R2 (`R2_*`): foto com mais de `FOTOS_LOCAL_DIAS` (7) sai do SD depois de confirmada no bucket, que apaga com 30 dias; `/fotos/<nome>` redireciona para o R2 quando a foto ja saiu do disco.
 - Historico de alertas sobrevive a restart (`fotos/.eventos.json`; sem o arquivo, volta do R2).

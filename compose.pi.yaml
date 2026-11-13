@@ -27,6 +27,8 @@ services:
       # .env. Sem elas o R2 fica desligado e tudo fica só no SD.
       R2_ENDPOINT: https://2d7aec1a895c4c7704424ba082334784.r2.cloudflarestorage.com
       R2_BUCKET: camera-monitor-fotos
+      # Confirmação dos alertas no Workers AI; o token (CF_AI_TOKEN) vem do .env.
+      CF_ACCOUNT_ID: 2d7aec1a895c4c7704424ba082334784
     ports:
       - "8091:8090"   # rede local também: sem o JWT do Access vale APP_USER/APP_PASS
     volumes:

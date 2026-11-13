@@ -6,6 +6,7 @@ lê os frames, roda MobileNet-SSD, desenha as caixas, serve a página em
 http://localhost:8090 e dispara uma notificação desktop.
 """
 
+import base64
 import hashlib
 import hmac
 import io
@@ -78,6 +79,17 @@ FOTO_NOME = re.compile(r"\d{8}_\d{6}_\w+\.(?:jpg|mp4)")  # foto ou clipe do aler
 CLIPE_ANTES_S = float(os.environ.get("CLIPE_ANTES_S") or "5")
 CLIPE_MAX_S = float(os.environ.get("CLIPE_MAX_S") or "30")
 CLIPE_PARADO_S = 3             # sem movimento por isso = fim do clipe
+# Confirmação do alerta no Workers AI antes do push: o MobileNet dá falso alarme
+# (grade, moto, sombra) e o Gemma 4 olha a foto. Só com CF_ACCOUNT_ID e
+# CF_AI_TOKEN. No plano Workers Free a cota (10 mil neurons/dia, ~3,8 por foto)
+# não gera cobrança, e IA_LIMITE_DIA é uma segunda trava aqui. Erro, demora ou
+# limite: o push sai como antes.
+CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
+CF_AI_TOKEN = os.environ.get("CF_AI_TOKEN", "")
+IA_ON = bool(CF_ACCOUNT_ID and CF_AI_TOKEN)
+IA_MODELO = os.environ.get("IA_MODELO") or "@cf/google/gemma-4-26b-a4b-it"
+IA_LIMITE_DIA = int(os.environ.get("IA_LIMITE_DIA") or "1500")
+IA_TIMEOUT_S = 20
 CLIPE_LARGURA = 640            # 1080p no PC vira 640x360: arquivo pequeno pro celular
 # A detecção roda em thread própria sobre o frame mais recente, então o vídeo não
 # trava enquanto ela pensa (num Pi 3 uma análise custa ~2,5s). Estes dois são o
@@ -340,6 +352,73 @@ def carregar_eventos():
         state["events"].extend(json.loads(corpo))
     except ValueError:
         pass
+
+
+# ------------------------------------------------------------ confirmação por IA
+IA_PERGUNTA = {
+    "pessoa": "Há uma pessoa de verdade na cena?",
+    "animal": "Há um animal de verdade na cena (gato, cachorro, pássaro etc.)?",
+}
+ia_uso = {"dia": "", "n": 0}
+
+
+def ler_veredito(texto):
+    """'```json {"sim": true, "descricao": "..."} ```' -> (True, '...')."""
+    m = re.search(r"\{.*\}", texto, re.S)
+    if not m:
+        raise ValueError(f"resposta sem JSON: {texto[:80]!r}")
+    d = json.loads(m.group())
+    return bool(d["sim"]), str(d.get("descricao", ""))[:80]
+
+
+def ia_confirmar(cat, jpg):
+    """(True|False, descrição); (None, motivo) quando não deu para perguntar."""
+    dia = time.strftime("%Y-%m-%d", time.gmtime())  # a cota da Cloudflare zera 00:00 UTC
+    with lock:
+        if ia_uso["dia"] != dia:
+            ia_uso.update(dia=dia, n=0)
+        if ia_uso["n"] >= IA_LIMITE_DIA:
+            return None, "limite diário da IA"
+        ia_uso["n"] += 1
+    pergunta = (f"Foto de câmera de segurança apontada para um portão. Ignore textos e "
+                f"caixas coloridas desenhados na imagem. {IA_PERGUNTA[cat]} Responda só "
+                'JSON: {"sim": true|false, "descricao": "até 10 palavras em português"}')
+    corpo = json.dumps({
+        "max_tokens": 120, "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": pergunta},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}}]}],
+    }).encode()
+    req = urllib.request.Request(
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{IA_MODELO}",
+        data=corpo, headers={"Authorization": f"Bearer {CF_AI_TOKEN}",
+                             "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=IA_TIMEOUT_S) as r:
+            texto = json.load(r)["result"]["choices"][0]["message"]["content"]
+        return ler_veredito(texto)
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
+        return None, f"IA falhou: {e}"
+
+
+def avisar_alerta(ev, cat, jpg):
+    """Push do alerta; com a IA ligada, só se ela confirmar (ou não responder)."""
+    if not IA_ON:
+        phone_notify(ev["title"], ev["msg"], jpg)
+        return
+    ev["ia"] = "pendente"
+
+    def confirmar():
+        sim, desc = ia_confirmar(cat, jpg)
+        print(f"IA {ev['photo']}: {sim} - {desc}", flush=True)
+        with lock:
+            ev["ia"] = {True: "confirmado", False: "descartado", None: "sem_ia"}[sim]
+            ev["ia_desc"] = desc
+        salvar_eventos()
+        if sim is not False:
+            phone_notify(ev["title"], f"{ev['msg']} {desc.rstrip('.')}." if sim else ev["msg"], jpg)
+    threading.Thread(target=confirmar, name="camera-ia", daemon=True).start()
 
 
 def desktop_notify(title: str, msg: str) -> None:
@@ -751,10 +830,14 @@ class Clipe:
             for ev in self.eventos:
                 ev["video"] = self.nome
             titulo = self.eventos[0]["title"] if self.eventos else "Alerta"
+            descartado = bool(self.eventos) and all(
+                ev.get("ia") == "descartado" for ev in self.eventos)
         salvar_eventos()
         with open(final, "rb") as f:
             dados = f.read()
         r2_enviar(f"fotos/{self.nome}", dados, "video/mp4")
+        if descartado:  # a IA disse que era falso alarme: fica só no histórico
+            return
         phone_notify(f"Vídeo: {titulo}", f"{quadros / self.fps:.0f} s de gravação.",
                      dados, "video.mp4", "low")
 
@@ -799,10 +882,11 @@ def capture_loop():
         ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok:
             for ev in fired:  # foto já com as caixas desenhadas
-                ev["photo"] = f"{time.strftime('%Y%m%d_%H%M%S')}_{ev.pop('cat')}.jpg"
+                cat = ev.pop("cat")
+                ev["photo"] = f"{time.strftime('%Y%m%d_%H%M%S')}_{cat}.jpg"
                 with open(os.path.join(FOTOS_DIR, ev["photo"]), "wb") as f:
                     f.write(jpg.tobytes())
-                phone_notify(ev["title"], ev["msg"], jpg.tobytes())
+                avisar_alerta(ev, cat, jpg.tobytes())
                 r2_enviar(f"fotos/{ev['photo']}", jpg.tobytes(), "image/jpeg")
             if fired and CLIPE_MAX_S > 0:
                 if clipe is None and antes:
@@ -1188,6 +1272,7 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
   .empty{color:#6b7280}
   .thumb{display:block;width:100%;border-radius:6px;margin-top:6px}
   .video{display:inline-block;margin-top:4px;color:inherit;font-size:.9em}
+  .descartado{opacity:.55}
   #painel{background:#1f2937;border-radius:8px;padding:6px}
   .barra{display:flex;gap:6px;align-items:center;margin-bottom:6px}
   .barra button{background:#374151;color:#e5e7eb;border:0;border-radius:6px;
@@ -1244,6 +1329,7 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 </main>
 <p id="aviso" hidden>painel aberto na janela flutuante</p>
 <script>
+const esc=t=>String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let ctx=null, lastEv=null;
 // guardados uma vez: quando o painel vai para o PiP, document.getElementById
 // daqui deixa de achá-los (eles passam a viver no documento da outra janela)
@@ -1276,7 +1362,7 @@ async function tick(){
     if(lastEv !== null && newest && newest !== lastEv){ beep(); pipAlert(); audioNoAlerta(); }
     lastEv = newest || '';
     elLog.innerHTML = s.events.length
-      ? s.events.map(e=>`<li><time>${e.time}</time>${e.title} — ${e.msg}${e.photo?`<a href="/fotos/${e.photo}" target="_blank"><img class="thumb" src="/fotos/${e.photo}" loading="lazy"></a>`:''}${e.video?`<a class="video" href="/fotos/${e.video}" target="_blank">▶ vídeo</a>`:''}</li>`).join('')
+      ? s.events.map(e=>`<li${e.ia==='descartado'?' class="descartado"':''}><time>${e.time}</time>${e.title} — ${e.msg}${e.ia_desc?` <em>IA: ${e.ia==='descartado'?'falso alarme, ':''}${esc(e.ia_desc)}</em>`:''}${e.photo?`<a href="/fotos/${e.photo}" target="_blank"><img class="thumb" src="/fotos/${e.photo}" loading="lazy"></a>`:''}${e.video?`<a class="video" href="/fotos/${e.video}" target="_blank">▶ vídeo</a>`:''}</li>`).join('')
       : '<li class="empty">nenhuma ainda</li>';
   }catch(e){}
 }
@@ -1453,6 +1539,14 @@ def _selfcheck():
     R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY, R2_SECRET_KEY = r2_real
     assert all(FOTO_NOME.fullmatch(n) for n in ("20261113_120000_pessoa.jpg", "20261113_120000_animal.jpg"))
     assert not any(FOTO_NOME.fullmatch(n) for n in (".eventos.json", ".presets", "../x.jpg"))
+    assert ler_veredito('```json\n{"sim": false, "descricao": "só o portão"}\n```') == (False, "só o portão")
+    assert ler_veredito('{"sim": true, "descricao": "homem de costas"}')[0] is True
+    for ruim in ("não sei", '{"descricao": "x"}'):
+        try:
+            ler_veredito(ruim)
+            assert False, ruim
+        except (ValueError, KeyError):
+            pass
 
 
 def start_capture_worker():

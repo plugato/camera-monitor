@@ -85,6 +85,8 @@ Variaveis opcionais:
 | `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY`, `R2_SECRET_KEY` | vazio | Copia das fotos e do historico num bucket R2. Vazio = so no disco |
 | `CLIPE_ANTES_S` | `5` | Segundos de video antes do alerta no clipe (a deteccao no Pi chega 3-5 s atrasada) |
 | `CLIPE_MAX_S` | `30` | Duracao maxima do clipe depois do alerta; `0` desliga os clipes |
+| `CF_ACCOUNT_ID`, `CF_AI_TOKEN` | vazio | Confirma cada alerta no Workers AI antes do push. Vazio = push direto |
+| `IA_LIMITE_DIA` | `1500` | Maximo de consultas a IA por dia (UTC); passou, o push sai sem confirmar |
 | `FOTOS_LOCAL_DIAS` | `7` | Com R2: foto mais velha que isso sai do disco depois de confirmada no bucket |
 | `DETECT_THREADS` | `0` (todas) | Threads do OpenCV na deteccao |
 | `DETECT_INTERVAL_S` | `0.4` | Pausa minima entre duas analises |
@@ -275,6 +277,25 @@ celular ou navegador) em `fotos/`, com o mesmo nome da foto:
 - pronto o clipe, aparece um link "video" no historico do painel, ele sobe para
   o R2 (se ligado) e vai um segundo push no ntfy, de prioridade baixa (sem som),
   com o video anexado.
+
+## Confirmacao dos alertas por IA
+
+O MobileNet-SSD do Pi da falso alarme (grade do portao, moto, sombra). Com
+`CF_ACCOUNT_ID` e `CF_AI_TOKEN`, a foto de cada alerta vai para o Gemma 4 no
+Cloudflare Workers AI antes do push:
+
+- confirmou: push normal, com a descricao da IA ("Homem de costas perto do portao");
+- descartou: sem push (nem o do clipe); o alerta fica no historico do painel,
+  apagado, com "IA: falso alarme";
+- erro, demora acima de 20 s ou `IA_LIMITE_DIA` atingido: o push sai como antes.
+
+Custo: ~3,8 neurons por foto. No plano **Workers Free** a cota de 10 mil
+neurons/dia nao gera cobranca (passou dela, a chamada falha e o push sai sem
+confirmar); `IA_LIMITE_DIA` (1500, ~5,7 mil neurons) e uma segunda trava.
+
+Token: **My Profile > API Tokens > Create Token > Custom**, permissao
+**Account > Workers AI > Read**. No Pi ele vai no secret `CF_AI_TOKEN` do GitHub,
+que o deploy acrescenta ao `.env`; `CF_ACCOUNT_ID` ja esta no `compose.pi.yaml`.
 
 ## Fotos no Cloudflare R2
 
