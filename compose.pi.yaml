@@ -29,6 +29,8 @@ services:
       R2_BUCKET: camera-monitor-fotos
       # Confirmação dos alertas no Workers AI; o token (CF_AI_TOKEN) vem do .env.
       CF_ACCOUNT_ID: 2d7aec1a895c4c7704424ba082334784
+      # Botão "Histórico" do painel: Worker camera-nuvem (nuvem/), lê o R2
+      HISTORICO_URL: https://historico.ancalagon.com.br
     ports:
       - "8091:8090"   # rede local também: sem o JWT do Access vale APP_USER/APP_PASS
     volumes:

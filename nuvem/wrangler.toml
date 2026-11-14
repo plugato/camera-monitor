@@ -1,0 +1,25 @@
+# Worker "camera-nuvem": histórico das fotos/clipes (R2) e vigia do Pi.
+#   cd nuvem && npx wrangler deploy
+# Segredos (uma vez; ficam entre deploys):
+#   npx wrangler secret put NTFY_URL             # o mesmo tópico do .env do Pi
+#   npx wrangler secret put VIGIA_CLIENT_ID      # service token "camera-vigia"
+#   npx wrangler secret put VIGIA_CLIENT_SECRET
+name = "camera-nuvem"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+# Só pelo domínio próprio, que está atrás do Cloudflare Access
+workers_dev = false
+preview_urls = false
+routes = [{ pattern = "historico.ancalagon.com.br", custom_domain = true }]
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[r2_buckets]]
+binding = "FOTOS"
+bucket_name = "camera-monitor-fotos"
+
+[vars]
+PAINEL_URL = "https://camera.ancalagon.com.br"
+ACCESS_TEAM = "https://plugato.cloudflareaccess.com"
+ACCESS_AUD = "1f2d0ae7db07c363d3248c767d4b2216bca5d64f077d61fa5308e44c5662d8ba" # app "camera-historico"

@@ -27,3 +27,7 @@ auto.key
 *.pcap
 *.pcapng
 *.apk
+
+# Worker (nuvem/): cache local do wrangler
+.wrangler/
+node_modules/

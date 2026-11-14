@@ -339,6 +339,39 @@ O bucket e privado: nada fica publico, so os links assinados que o painel gera
 para quem ja entrou nele. Custo: ~30 KB por foto e algumas centenas de KB por clipe,
 bem dentro dos 10 GB gratis.
 
+## Historico e vigia na nuvem (Worker)
+
+O Worker `camera-nuvem` (pasta `nuvem/`) roda na Cloudflare, fora do Pi:
+
+- **Historico** em `https://historico.ancalagon.com.br`: fotos e clipes dos ultimos
+  30 dias por dia, lidos direto do bucket R2, com o veredito da IA quando o alerta
+  ainda esta no `eventos.json`. Abre mesmo com o Pi desligado, e os videos saem da
+  Cloudflare, nao do upload de casa. O botao **📼 Histórico** do painel aparece com
+  `HISTORICO_URL` (no `compose.pi.yaml`).
+- **Vigia** (Cron Trigger a cada 5 min): testa `https://camera.ancalagon.com.br/healthz`
+  com um service token do Access. Duas falhas seguidas (10 min) mandam push
+  "Pi fora do ar" no mesmo topico do ntfy; quando volta, "Pi voltou" com o tempo fora.
+  O aviso de "camera sem imagem" do proprio Pi nao cobre Pi sem luz ou sem internet.
+  O estado fica em `vigia.json` no bucket, gravado so quando muda.
+
+O dominio fica atras do app `camera-historico` do Cloudflare Access (mesma policy do
+painel), e o Worker confere o JWT do Access de novo. `workers.dev` desligado.
+
+Deploy (o CI nao publica o Worker):
+
+```bash
+cd nuvem
+node teste.mjs                                  # logica com R2 e fetch falsos
+npx wrangler deploy
+npx wrangler secret put NTFY_URL                # o mesmo do .env do Pi
+npx wrangler secret put VIGIA_CLIENT_ID         # service token "camera-vigia"
+npx wrangler secret put VIGIA_CLIENT_SECRET
+```
+
+O service token `camera-vigia` precisa de uma policy **Service Auth** no app do
+painel (`camera`). Sem os dois `VIGIA_*`, o vigia nao roda. Custo: ~290 execucoes/dia
+e algumas leituras no R2, dentro do plano gratis.
+
 ## Controle PTZ
 
 A interface possui quatro direcoes:
@@ -447,6 +480,7 @@ Validar sintaxe:
 ```bash
 python3 -m py_compile server.py config.py ptz.py
 bash -n start.sh start-mediamtx.sh
+node nuvem/teste.mjs
 ```
 
 O teste de deteccao usa fotos de referencia privadas em `fotos/` ou `teste/`, quando disponiveis:
@@ -460,6 +494,7 @@ python3 test_detect.py
 ```text
 server.py                 Aplicacao Flask, stream, deteccao, audio e PTZ
 ptz.py                    Cliente ONVIF para movimento da camera
+nuvem/                    Worker da Cloudflare: historico (R2) e vigia do Pi
 Dockerfile                Imagem do monitor com FFmpeg e MediaMTX
 Dockerfile.pi             Imagem para Raspberry Pi 32 bits (armv7)
 compose.yaml              Monitor e Cloudflare Tunnel

@@ -24,6 +24,9 @@ jobs:
       - name: Validate Python
         run: python -m py_compile server.py config.py ptz.py
 
+      - name: Test Worker (nuvem/)
+        run: node nuvem/teste.mjs
+
       - name: Validate shell scripts
         run: bash -n start.sh start-mediamtx.sh docker-entrypoint.sh
 

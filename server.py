@@ -61,6 +61,7 @@ CF_ACCESS_TEAM = os.environ.get("CF_ACCESS_TEAM", "")  # <team>.cloudflareaccess
 CF_ACCESS_AUD = os.environ.get("CF_ACCESS_AUD", "")    # Application Audience (AUD) tag
 NTFY_URL = os.environ.get("NTFY_URL", "")  # push no celular: https://ntfy.sh/<tópico-secreto>
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "")  # tocar no push abre o ao vivo
+HISTORICO_URL = os.environ.get("HISTORICO_URL", "")  # Worker camera-nuvem (nuvem/): fotos e clipes do R2
 FOTOS_DIR = "fotos"            # snapshot anotado de cada notificação
 EVENTOS_JSON = os.path.join(FOTOS_DIR, ".eventos.json")  # histórico sobrevive ao restart
 # Cópia das fotos e do histórico num bucket R2 (API S3). Com o R2 ligado, a foto
@@ -1257,7 +1258,10 @@ def posicao(nome):
 
 @app.route("/")
 def index():
-    return PAGE
+    if not HISTORICO_URL:
+        return PAGE
+    return PAGE.replace("<!--historico-->", f'<a id="hist" href="{HISTORICO_URL}" target="_blank" '
+                        'title="Fotos e clipes dos últimos 30 dias, direto da nuvem">📼 Histórico</a>')
 
 
 PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
@@ -1268,7 +1272,8 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
   h1{font-size:16px;margin:0}
   #st{padding:3px 10px;border-radius:99px;font-size:12px;background:#7f1d1d}
   #st.on{background:#14532d}
-  #snd,#pip,#au,#aual{background:#374151;color:#e5e7eb;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
+  #snd,#pip,#au,#aual,#hist{background:#374151;color:#e5e7eb;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
+  #hist{text-decoration:none;font-size:13.33px}
   #snd{margin-left:auto}
   #snd.on,#au.on,#aual.on{background:#1d4ed8}
   main{display:grid;grid-template-columns:2fr 1fr;gap:16px;padding:16px;max-width:1300px;margin:auto}
@@ -1316,7 +1321,7 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
   body.so-pip main{grid-template-columns:1fr;padding:8px}
 </style></head><body>
 <header><h1>📷 Monitor da Câmera <span style="color:#9ca3af;font-weight:400">· Raspberry Pi</span></h1>
-<button id="pip" title="Painel flutuante por cima de tudo, com todos os controles">🗗 PiP</button></header>
+<button id="pip" title="Painel flutuante por cima de tudo, com todos os controles">🗗 PiP</button><!--historico--></header>
 <main>
   <!-- #painel é movido inteiro para a janela de PiP: os controles vão junto, com
        os mesmos nós do DOM, então todos os handlers continuam valendo -->
