@@ -1284,6 +1284,7 @@ PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
   .empty{color:#6b7280}
   .thumb{display:block;width:100%;border-radius:6px;margin-top:6px}
   .video{display:inline-block;margin-top:4px;color:inherit;font-size:.9em}
+  video.thumb{aspect-ratio:16/9;background:#000}
   .descartado{opacity:.55}
   #painel{background:#1f2937;border-radius:8px;padding:6px}
   .barra{display:flex;gap:6px;align-items:center;margin-bottom:6px}
@@ -1373,10 +1374,35 @@ async function tick(){
     const newest = s.events[0] ? s.events[0].time + s.events[0].photo : null;
     if(lastEv !== null && newest && newest !== lastEv){ beep(); pipAlert(); audioNoAlerta(); }
     lastEv = newest || '';
-    elLog.innerHTML = s.events.length
-      ? s.events.map(e=>`<li${e.ia==='descartado'?' class="descartado"':''}><time>${e.time}</time>${e.title} — ${e.msg}${e.ia_desc?` <em>IA: ${e.ia==='descartado'?'falso alarme, ':''}${esc(e.ia_desc)}</em>`:''}${e.photo?`<a href="/fotos/${e.photo}" target="_blank"><img class="thumb" src="/fotos/${e.photo}" loading="lazy"></a>`:''}${e.video?`<a class="video" href="/fotos/${e.video}" target="_blank">▶ vídeo</a>`:''}</li>`).join('')
-      : '<li class="empty">nenhuma ainda</li>';
+    renderLog(s.events.map(evHtml));
   }catch(e){}
+}
+// Histórico: o clipe toca aqui mesmo, no item do alerta que abriu o clipe (a foto
+// vira a capa); os alertas que caíram dentro do mesmo clipe ficam com foto + link.
+function evHtml(e){
+  const ia = e.ia_desc ? ` <em>IA: ${e.ia==='descartado'?'falso alarme, ':''}${esc(e.ia_desc)}</em>` : '';
+  const dono = e.video && e.photo && e.video === e.photo.slice(0,-4)+'.mp4';
+  const midia = dono
+    ? `<video class="thumb" src="/fotos/${e.video}" poster="/fotos/${e.photo}" controls playsinline preload="none"></video>`
+      + `<a class="video" href="/fotos/${e.photo}" target="_blank">foto</a>`
+    : (e.photo ? `<a href="/fotos/${e.photo}" target="_blank"><img class="thumb" src="/fotos/${e.photo}" loading="lazy"></a>` : '')
+      + (e.video ? `<a class="video" href="/fotos/${e.video}" target="_blank">▶ vídeo</a>` : '');
+  return `<li${e.ia==='descartado'?' class="descartado"':''}><time>${e.time}</time>${e.title} — ${e.msg}${ia}${midia}</li>`;
+}
+// O /status chega a cada 1,5 s; refazer a lista inteira cortava o vídeo no meio.
+// Cada <li> é reaproveitado enquanto o HTML dele não muda; só entra o que é novo.
+let logEls=new Map();
+function renderLog(htmls){
+  if(!htmls.length){ logEls.clear(); elLog.innerHTML='<li class="empty">nenhuma ainda</li>'; return; }
+  const novo=new Map(), els=htmls.map(h=>{
+    let el=novo.has(h) ? null : logEls.get(h);
+    if(!el){ const t=elLog.ownerDocument.createElement('template'); t.innerHTML=h; el=t.content.firstElementChild; }
+    if(!novo.has(h)) novo.set(h,el);
+    return el;
+  });
+  logEls=novo;
+  els.forEach((el,i)=>{ if(elLog.children[i]!==el) elLog.insertBefore(el, elLog.children[i]||null); });
+  while(elLog.children.length>els.length) elLog.lastElementChild.remove();
 }
 // áudio da câmera: /audio manda PCM16 16 kHz; tocamos com Web Audio (fila de ~150 ms)
 const au=document.getElementById('au'); let actx=null, auAbort=null;

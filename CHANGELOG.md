@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Clipe toca dentro do painel: o alerta que abriu o clipe mostra o player (a foto vira a capa), sem baixar nada ate dar play. O historico deixou de ser refeito a cada 1,5 s, o que cortava o video no meio.
 - Alerta confirmado no Workers AI (Gemma 4) antes do push: falso alarme fica so no historico, marcado; erro, demora ou `IA_LIMITE_DIA` mandam o push como antes.
 - `/test` passa pelo caminho real do alerta: ultima foto -> IA -> push, e responde o que a IA disse.
 - Clipe MP4 de cada alerta: 5 s antes (`CLIPE_ANTES_S`), segue enquanto houver movimento ate 30 s (`CLIPE_MAX_S`); link no historico, push de prioridade baixa com o video e copia no R2.
