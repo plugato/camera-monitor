@@ -24,6 +24,9 @@ jobs:
       - name: Validate Python
         run: python -m py_compile server.py config.py ptz.py
 
+      - name: Self-check do server.py
+        run: python -c "import server; server._selfcheck()"
+
       - name: Test Worker (nuvem/)
         run: node nuvem/teste.mjs
 

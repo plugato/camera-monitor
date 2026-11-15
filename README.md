@@ -276,7 +276,12 @@ celular ou navegador) em `fotos/`, com o mesmo nome da foto:
   se faltar CPU, o clipe perde quadro e o video ao vivo segue;
 - pronto o clipe, aparece um link "video" no historico do painel, ele sobe para
   o R2 (se ligado) e vai um segundo push no ntfy, de prioridade baixa (sem som),
-  com o video anexado.
+  com a foto do alerta (o ntfy mostra imagem na notificacao; MP4 nao, e recusa
+  anexo de 2 MB ou mais). Tocar no push ou em "Ver video" abre o clipe no
+  historico na nuvem (`HISTORICO_URL`), ou no painel sem ela.
+- quem fica parado no portao nao vira um alerta a cada 20 s: dentro da mesma
+  visita (a pessoa nao some por 2 min), alerta novo so a cada `ALERTA_REPETE_S`
+  (600 s).
 
 ## Confirmacao dos alertas por IA
 

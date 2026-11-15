@@ -115,6 +115,12 @@ MOTION_IDLE_S = 10
 CONFIDENCE_MIN = {"pessoa": float(os.environ.get("PESSOA_MIN") or "0.25"),
                   "animal": 0.65}
 NOTIFY_COOLDOWN_S = 20         # antispam de toast, por categoria
+# Visita: a mesma categoria vista de novo em menos de VISITA_GAP_S é a mesma
+# pessoa ainda ali. Dentro da visita, alerta novo (foto, IA, clipe, push) só a
+# cada ALERTA_REPETE_S. Em 14/11 alguém lavando o carro 2 h no portão deu 199
+# alertas com os 20 s; com 120/600 seriam 19.
+VISITA_GAP_S = 120
+ALERTA_REPETE_S = float(os.environ.get("ALERTA_REPETE_S") or "600")
 # nº de análises seguidas antes de notificar. No Pi 3 cada análise leva ~4,5s:
 # com 3 para pessoa, quem para alguns segundos no portão nunca notificava. O 3
 # fica para animal, que é onde o modelo alucina (carro/grade vira "pássaro").
@@ -151,6 +157,7 @@ state = {
     "connected": False,
     "espectadores": 0,          # conexões abertas em /stream
     "last_notify": {},          # categoria -> timestamp
+    "last_seen": {},            # categoria -> última análise com ela (visita)
 }
 lock = threading.Lock()
 
@@ -190,19 +197,28 @@ def healthz():
     return "ok"
 
 
-def phone_notify(title, msg, jpg=None, nome="foto.jpg", prioridade="high"):
+def ntfy_cabecalho(texto):
+    """RFC 2047 numa linha só: o Header() dobra texto longo com '\\n ' e o nginx
+    do ntfy.sh recusa (400). Com a descrição da IA todo push confirmado caía."""
+    return Header(texto, "utf-8").encode(maxlinelen=10_000)
+
+
+def phone_notify(title, msg, jpg=None, nome="foto.jpg", prioridade="high", link=None):
     """Push via ntfy (app no celular), com a foto (ou o clipe) anexada. Em thread:
     rede lenta não pode segurar o loop de captura."""
     if not NTFY_URL:
         return
-    headers = {"Title": Header(title, "utf-8").encode(),
-               "Message": Header(msg, "utf-8").encode(),
+    headers = {"Title": ntfy_cabecalho(title),
+               "Message": ntfy_cabecalho(msg),
                "Priority": prioridade, "Tags": "rotating_light"}
     if jpg:
         headers["Filename"] = nome
-    if PUBLIC_URL:
-        headers["Click"] = PUBLIC_URL
-        headers["Actions"] = f"view, Ao vivo, {PUBLIC_URL}"
+    if link or PUBLIC_URL:
+        headers["Click"] = link or PUBLIC_URL
+    acoes = ([f"view, Ver vídeo, {link}"] if link else []) + (
+        [f"view, Ao vivo, {PUBLIC_URL}"] if PUBLIC_URL else [])
+    if acoes:
+        headers["Actions"] = ntfy_cabecalho("; ".join(acoes))
 
     def send():
         try:
@@ -516,9 +532,12 @@ def maybe_notify(dets):
             streaks[cat] = 0
     for cat, labels in by_cat.items():
         streaks[cat] = streaks.get(cat, 0) + 1
+        visita = now - state["last_seen"].get(cat, 0) < VISITA_GAP_S
+        state["last_seen"][cat] = now
         if streaks[cat] < STREAK_MIN[cat]:
             continue
-        if now - state["last_notify"].get(cat, 0) < NOTIFY_COOLDOWN_S:
+        espera = ALERTA_REPETE_S if visita else NOTIFY_COOLDOWN_S
+        if now - state["last_notify"].get(cat, 0) < espera:
             continue
         state["last_notify"][cat] = now
         titulo = "Pessoa detectada!" if cat == "pessoa" else "Animal detectado!"
@@ -831,6 +850,7 @@ class Clipe:
             for ev in self.eventos:
                 ev["video"] = self.nome
             titulo = self.eventos[0]["title"] if self.eventos else "Alerta"
+            foto = self.eventos[0].get("photo") if self.eventos else None
             descartado = bool(self.eventos) and all(
                 ev.get("ia") == "descartado" for ev in self.eventos)
         salvar_eventos()
@@ -839,8 +859,18 @@ class Clipe:
         r2_enviar(f"fotos/{self.nome}", dados, "video/mp4")
         if descartado:  # a IA disse que era falso alarme: fica só no histórico
             return
-        phone_notify(f"Vídeo: {titulo}", f"{quadros / self.fps:.0f} s de gravação.",
-                     dados, "video.mp4", "low")
+        # Vai a foto, não o MP4: o ntfy mostra imagem dentro da notificação (vídeo
+        # vira só um arquivo) e recusa anexo de 2 MB ou mais (413) sem conta.
+        # Tocar abre o clipe: no histórico da nuvem, ou no painel.
+        try:
+            with open(os.path.join(FOTOS_DIR, foto), "rb") as f:
+                capa = f.read()
+        except (OSError, TypeError):
+            capa = None
+        link = (f"{HISTORICO_URL}#{self.nome[:8]}" if HISTORICO_URL
+                else f"{PUBLIC_URL.rstrip('/')}/fotos/{self.nome}" if PUBLIC_URL else None)
+        phone_notify(f"Vídeo: {titulo}", f"{quadros / self.fps:.0f} s de gravação. Toque para ver.",
+                     capa, "foto.jpg", "low", link=link)
 
 
 def abrir_clipe(nome, antes):
@@ -1527,7 +1557,24 @@ setInterval(tick, 1500); tick();
 
 
 def _selfcheck():
+    from unittest import mock
     global tracked
+    longo = ntfy_cabecalho("Câmera: Pessoa em cena. Uma pessoa lavando um carro preto em frente.")
+    assert "\n" not in longo and longo.startswith("=?utf-8?")
+    real = dict(state["last_notify"]), dict(state["last_seen"]), desktop_notify
+    globals()["desktop_notify"] = lambda *a: None
+    state["last_notify"].clear(); state["last_seen"].clear(); streaks.clear()
+    p = [{"category": "pessoa", "label": "Pessoa", "box": [0, 0, 1, 1]}]
+    disparos = []
+    for t in range(0, 1300, 5):  # 1300 s seguidos no portão
+        with mock.patch("time.time", return_value=1e6 + t):
+            disparos += [t for _ in maybe_notify(p)]
+    assert disparos == [0, 600, 1200], disparos
+    with mock.patch("time.time", return_value=1e6 + 1300 + VISITA_GAP_S):  # saiu e voltou
+        assert len(maybe_notify(p)) == 1
+    state["last_notify"].clear(); state["last_seen"].clear(); streaks.clear()
+    state["last_notify"].update(real[0]); state["last_seen"].update(real[1])
+    globals()["desktop_notify"] = real[2]
     tracked = []
     car = {"box": [0, 60, 830, 540], "category": "animal", "label": "Pássaro"}
     cat = {"box": [900, 700, 1000, 800], "category": "animal", "label": "Gato"}

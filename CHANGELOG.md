@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Push confirmado pela IA nao chegava desde 13/11: com a descricao da IA o titulo/mensagem passava de ~75 caracteres, o `Header()` dobrava a linha e o ntfy.sh respondia 400. Cabecalho agora numa linha so.
+- Push do clipe leva a foto do alerta (aparece dentro da notificacao) em vez do MP4, que o ntfy nao mostra e recusa com 2 MB ou mais (413, 116 vezes em 14/11). Tocar, ou o botao "Ver video", abre o clipe no historico da nuvem.
+- Visita: com a mesma categoria vista de novo em menos de 2 min, alerta novo so a cada `ALERTA_REPETE_S` (600 s). Em 14/11 alguem lavando o carro 2 h no portao gerou 199 alertas (foto, IA, clipe); seriam 19.
 - Worker `camera-nuvem` (`nuvem/`): historico de fotos e clipes dos ultimos 30 dias direto do R2 em `historico.ancalagon.com.br` (atras do Access, abre com o Pi desligado), e vigia a cada 5 min que manda push quando o Pi some (sem luz, sem internet, travado) e quando volta. Botao **📼 Histórico** no painel com `HISTORICO_URL`.
 - Clipe toca dentro do painel: o alerta que abriu o clipe mostra o player (a foto vira a capa), sem baixar nada ate dar play. O historico deixou de ser refeito a cada 1,5 s, o que cortava o video no meio.
 - Alerta confirmado no Workers AI (Gemma 4) antes do push: falso alarme fica so no historico, marcado; erro, demora ou `IA_LIMITE_DIA` mandam o push como antes.
