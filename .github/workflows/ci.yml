@@ -25,6 +25,10 @@ jobs:
         run: python -m py_compile server.py config.py ptz.py
 
       - name: Self-check do server.py
+        env:  # o config.py exige a câmera; o self-check não conecta nela
+          CAM_HOST: 127.0.0.1
+          CAM_USER: ci
+          CAM_PASS: ci
         run: python -c "import server; server._selfcheck()"
 
       - name: Test Worker (nuvem/)
