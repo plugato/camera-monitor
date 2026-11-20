@@ -105,10 +105,14 @@ VIDEO_FPS = int(os.environ.get("VIDEO_FPS") or "8")
 # mudança com MOTION_BLOB px (miniatura 160x90). Contar pixels soltos não
 # servia: chuva muda 0,1-0,6% da cena em pingos de até 22 px e disparava
 # análise sem parar; pessoa (até atrás da grade) dá mancha mediana de 263 px.
-# 0 desliga o filtro. Parado, analisa mesmo assim a cada MOTION_IDLE_S para não
-# perder quem ficou imóvel.
+# 0 desliga o filtro. Parado, analisa mesmo assim de tempos em tempos para não
+# perder quem ficou imóvel: a cada MOTION_IDLE_S se a última análise achou alguém,
+# a cada MOTION_IDLE_VAZIO_S se a cena estava vazia. Quem chega se mexe e passa
+# pelo filtro; o MobileNet custa ~4,3 s de CPU no Pi 3, e reconferir cena vazia
+# a cada 10 s era ~43% de um núcleo (medido em 20/11).
 MOTION_BLOB = int(os.environ.get("MOTION_BLOB") or "40")
 MOTION_IDLE_S = 10
+MOTION_IDLE_VAZIO_S = float(os.environ.get("MOTION_IDLE_VAZIO_S") or "60")
 # Pessoa atrás da grade do portão sai com 0,25-0,45 (barras cortam o corpo);
 # portão vazio não dá nada nem no piso do modelo, 0,25 (medido de dia no Pi,
 # 2026-10). Falso alarme à noite? Suba PESSOA_MIN. Animal fica alto: alucinação.
@@ -490,7 +494,10 @@ def iou(a, b):
 
 
 STALL_S = 10                   # sem frame novo por esse tempo -> reinicia o VLC
-TRACK_GRACE_S = 60             # lembra a caixa por esse tempo se a detecção oscilar
+# Lembra a caixa por esse tempo se a detecção oscilar. Precisa passar com folga
+# do intervalo da cena vazia: senão o carro-"pássaro" parado é esquecido entre
+# duas análises, volta como novo e vira alerta de animal.
+TRACK_GRACE_S = max(60, 2 * MOTION_IDLE_VAZIO_S)
                                # (>= STATIC_AFTER_S, senão o piscar zera o relógio)
 tracked = []  # [box, first_seen, last_seen]
 
@@ -705,6 +712,12 @@ def moved(ref, thumb):
     return n > 1 and stats[1:, cv2.CC_STAT_AREA].max() >= MOTION_BLOB
 
 
+def hora_de_analisar(mudou, desde_ultima, ocupada):
+    """Roda o MobileNet? Sempre que a cena muda; parada, só reconfere de tempos em
+    tempos, mais seguido se a última análise achou alguém (pode ter ficado imóvel)."""
+    return mudou or desde_ultima >= (MOTION_IDLE_S if ocupada else MOTION_IDLE_VAZIO_S)
+
+
 def detect_loop():
     # Prioridade baixa só nesta thread (Linux): se a CPU não der para tudo, quem
     # atrasa é a detecção, não o FFmpeg — senão ele fica para trás no H265 e o
@@ -712,17 +725,18 @@ def detect_loop():
     # MobileNet roda inteiro aqui; com mais, os workers do TBB ficam em nice 0.
     if hasattr(os, "setpriority"):
         os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), DETECT_NICE)
-    ref, last_run = None, 0.0
+    ref, last_run, ocupada = None, 0.0, False
     while True:
         detect_ready.wait()
         detect_ready.clear()
         with lock:
             frame = detect_slot["frame"]
         thumb = motion_thumb(frame)
-        if not moved(ref, thumb) and time.time() - last_run < MOTION_IDLE_S:
+        if not hora_de_analisar(moved(ref, thumb), time.time() - last_run, ocupada):
             continue  # cena parada: não gasta o MobileNet
         ref, last_run = thumb, time.time()
         dets = drop_static(detect(frame))
+        ocupada = bool(dets)
         fired = maybe_notify(dets)  # sempre, para zerar streaks quando a cena esvazia
         with lock:
             detect_slot["dets"] = dets
@@ -1583,7 +1597,14 @@ def _selfcheck():
     assert drop_static([car, cat], now=STATIC_AFTER_S + 2) == [cat]  # gato novo passa
     assert drop_static([], now=STATIC_AFTER_S + 3) == []             # carro oscilou
     assert drop_static([car], now=STATIC_AFTER_S + 10) == []         # continua parado
+    t = STATIC_AFTER_S + 10 + MOTION_IDLE_VAZIO_S + 5                 # cena vazia, 1 min depois:
+    assert drop_static([], now=t) == []                              # o modelo piscou
+    assert drop_static([car], now=t + MOTION_IDLE_VAZIO_S) == []     # e segue lembrado
     tracked = []
+    assert hora_de_analisar(True, 0, False)                          # mexeu: analisa já
+    assert hora_de_analisar(False, MOTION_IDLE_S, True)              # alguém parado: 10 s
+    assert not hora_de_analisar(False, MOTION_IDLE_VAZIO_S - 1, False)  # vazia: espera
+    assert hora_de_analisar(False, MOTION_IDLE_VAZIO_S, False)
     y4m = io.BytesIO(b"YUV4MPEG2 W4 H2 F8:1 Ip A1:1 C420jpeg\n"
                      + (b"FRAME\n" + bytes(12)) * 2 + b"FRAME\n" + bytes(5))
     assert [f.shape for f in y4m_frames(y4m)] == [(3, 4), (3, 4)]  # truncado cai
