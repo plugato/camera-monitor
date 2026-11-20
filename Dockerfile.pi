@@ -1,22 +1,13 @@
-# Imagem para Raspberry Pi 32 bits (armv7). O PyPI nao tem wheel de opencv/numpy
-# para armv7 e compilar num Pi 3 leva horas, entao usamos os pacotes do Debian.
-FROM debian:bookworm-slim
+# Imagem do Raspberry Pi 3 (arm64; compose.pi.yaml: platform). Parte da base montada
+# pelo base-pi.sh (Debian + OpenCV do PyPI com NEON + MediaMTX) e so copia o app:
+# nenhum RUN aqui, porque o RUN arm64 morre com SIGSYS no Docker armhf do Pi.
+FROM camera-monitor-base:arm64
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
-       python3 python3-numpy python3-opencv python3-flask python3-jwt python3-cryptography gunicorn \
-    && rm -rf /var/lib/apt/lists/*
-
-ARG MEDIAMTX_VERSION=v1.21.1
-RUN curl -fsSL "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_armv7.tar.gz" \
-    | tar -xz -C /usr/local/bin mediamtx
-
 WORKDIR /app
 COPY server.py config.py ptz.py gunicorn.conf.py MobileNetSSD_deploy.prototxt MobileNetSSD_deploy.caffemodel ./
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

@@ -15,6 +15,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.pi
+    # 64 bits: o Pi roda kernel arm64 (arm_64bit=1 no /boot/config.txt) com o sistema
+    # em 32. Base: camera-monitor-base:arm64, montada pelo base-pi.sh (OpenCV com NEON:
+    # MobileNet em ~0,84 s contra ~4,3 s no armhf). Voltou o kernel de 32 bits? Volte o
+    # Dockerfile.pi/compose ao commit anterior a esta mudanca, senao nao sobe.
+    platform: linux/arm64
+    # O Docker do Pi e armhf: o seccomp padrao dele so conhece syscalls de 32 bits e mata
+    # o processo arm64 (SIGSYS). seccomp-pi.json = perfil padrao do Docker 28.5.2 com as
+    # duas arquiteturas; as mesmas restricoes continuam valendo.
+    security_opt:
+      - seccomp=seccomp-pi.json
     restart: unless-stopped
     env_file: .env
     environment:

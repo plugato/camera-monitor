@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Deteccao 5x mais rapida no Pi: o container passa a arm64 (kernel 64 bits no Pi com `arm_64bit=1`, sistema continua 32) com o OpenCV oficial do PyPI, compilado com NEON. MobileNet: ~0,81 s de CPU por analise, contra ~4,3 s no armhf; mesmas deteccoes nas fotos de teste. A base (Debian + OpenCV + MediaMTX arm64) sai do `base-pi.sh`, porque o build do Docker armhf do Pi nao roda RUN arm64; o `seccomp-pi.json` e o perfil padrao do Docker 28.5.2 aceitando syscalls arm e arm64 (sem ele o processo arm64 morre com SIGSYS).
 - Menos CPU no Pi: com a cena parada e vazia, o MobileNet reconfere a cada 60 s (`MOTION_IDLE_VAZIO_S`) em vez de 10 s; com alguem detectado segue a cada 10 s. Cada analise custa ~4,3 s de CPU no Pi 3 e a reconferencia da cena vazia era ~43% de um nucleo. Quem chega se mexe e continua sendo analisado na hora. `TRACK_GRACE_S` passa a 2x esse intervalo para o carro-"passaro" parado nao ser esquecido entre analises e virar alerta.
 - Push confirmado pela IA nao chegava desde 13/11: com a descricao da IA o titulo/mensagem passava de ~75 caracteres, o `Header()` dobrava a linha e o ntfy.sh respondia 400. Cabecalho agora numa linha so.
 - Push do clipe leva a foto do alerta (aparece dentro da notificacao) em vez do MP4, que o ntfy nao mostra e recusa com 2 MB ou mais (413, 116 vezes em 14/11). Tocar, ou o botao "Ver video", abre o clipe no historico da nuvem.
